@@ -1,0 +1,78 @@
+{
+  "name": "@ntropix/file-service",
+  "version": "1.0.0",
+  "description": "SDK del File Service de ntropix: subir, consultar y servir archivos. Cliente de servidor (Node, Next.js, NestJS) y helper de navegador.",
+  "keywords": [
+    "file-upload",
+    "storage",
+    "s3",
+    "presigned-url",
+    "multipart",
+    "nextjs",
+    "nestjs",
+    "ntropix"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/marcanii/file-service-sdk.git",
+    "directory": "js"
+  },
+  "homepage": "https://github.com/marcanii/file-service-sdk/tree/main/js#readme",
+  "type": "module",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=18"
+  },
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/cjs/index.d.ts",
+        "default": "./dist/cjs/index.js"
+      }
+    },
+    "./browser": {
+      "import": {
+        "types": "./dist/browser.d.ts",
+        "default": "./dist/browser.js"
+      },
+      "require": {
+        "types": "./dist/cjs/browser.d.ts",
+        "default": "./dist/cjs/browser.js"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "main": "./dist/cjs/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/cjs/index.d.ts",
+  "typesVersions": {
+    "*": {
+      "browser": [
+        "./dist/cjs/browser.d.ts"
+      ]
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && tsc -p tsconfig.cjs.json && node -e \"require('fs').writeFileSync('dist/cjs/package.json', JSON.stringify({ type: 'commonjs' }) + '\\n')\"",
+    "test": "node --test test/unit.test.mjs",
+    "test:e2e": "node test/e2e.mjs",
+    "test:browser-e2e": "node test/browser-e2e.mjs",
+    "prepublishOnly": "pnpm build && pnpm test"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  }
+}

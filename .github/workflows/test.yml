@@ -1,0 +1,50 @@
+# Tests unitarios de los 4 SDKs (incluidos los vectores compartidos de testdata/).
+name: test
+
+on:
+  push: { branches: [main] }
+  pull_request:
+
+jobs:
+  js:
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: js } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: pnpm install --frozen-lockfile && pnpm build && pnpm test
+      # El paquete debe resolver bien con import y require, en todos los modos de TypeScript.
+      - run: npm pack && npx -y @arethetypeswrong/cli@0.18.5 ntropix-file-service-*.tgz
+
+  python:
+    runs-on: ubuntu-latest
+    strategy: { matrix: { python: ["3.9", "3.13"] } }
+    defaults: { run: { working-directory: python } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "${{ matrix.python }}" }
+      - run: python -m unittest discover -s tests
+
+  go:
+    runs-on: ubuntu-latest
+    strategy: { matrix: { go: ["1.22", "1.24"] } }
+    defaults: { run: { working-directory: go } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "${{ matrix.go }}" }
+      - run: test -z "$(gofmt -l .)" && go vet ./... && go test ./...
+
+  php:
+    runs-on: ubuntu-latest
+    strategy: { matrix: { php: ["8.1", "8.3"] } }
+    defaults: { run: { working-directory: php } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with: { php-version: "${{ matrix.php }}", extensions: "curl, json" }
+      - run: php tests/unit.php

@@ -1,0 +1,43 @@
+# Publica cada SDK al empujar su tag (ver RELEASING.md). Go y PHP no necesitan workflow:
+# go get lee de GitHub y Packagist se actualiza con su hook.
+name: publish
+
+on:
+  push:
+    tags: ["js/v*", "python/v*"]
+
+jobs:
+  npm:
+    if: startsWith(github.ref_name, 'js/v')
+    runs-on: ubuntu-latest
+    permissions: { contents: read, id-token: write }
+    defaults: { run: { working-directory: js } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, registry-url: "https://registry.npmjs.org" }
+      - name: La versión del tag coincide con package.json
+        run: test "js/v$(node -p 'require("./package.json").version')" = "${GITHUB_REF_NAME}"
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build && pnpm test
+      - run: npm publish --provenance --access public
+        env: { NODE_AUTH_TOKEN: "${{ secrets.NPM_TOKEN }}" }
+
+  pypi:
+    if: startsWith(github.ref_name, 'python/v')
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions: { contents: read, id-token: write }   # trusted publishing (OIDC), sin tokens
+    defaults: { run: { working-directory: python } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: La versión del tag coincide con pyproject.toml
+        run: grep -q "^version = \"${GITHUB_REF_NAME#python/v}\"" pyproject.toml
+      - run: python -m unittest discover -s tests
+      - run: python -m pip install build && python -m build
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with: { packages-dir: python/dist }

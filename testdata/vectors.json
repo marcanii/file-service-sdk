@@ -1,0 +1,34 @@
+{
+  "_comment": "Vectores compartidos por todos los SDKs. Cada SDK los usa en sus tests: si uno diverge, rompe la compatibilidad entre lenguajes.",
+  "webhook": {
+    "secret": "whsec_vector_secret",
+    "timestamp": 1731250000,
+    "payload": "{\"id\":\"0193a1c7-2f00-7000-8000-000000000001\",\"type\":\"file.available\",\"data\":{\"file\":{\"id\":\"0193a1c7-2f00-7000-8000-0000000000aa\",\"project\":\"demo\",\"status\":\"AVAILABLE\",\"original_name\":\"foto.jpg\",\"mime_type\":\"image/jpeg\",\"size_bytes\":1234,\"content_hash\":\"abc\",\"owner_ref\":\"user_1\",\"visibility\":\"private\",\"metadata\":{},\"created_at\":\"2026-11-10T12:00:00Z\"}}}",
+    "signature": "t=1731250000,v1=166c8f0e94e7d85184c519bc1d48196a30cfcc00466de8532a2254019378617a",
+    "expected": {
+      "id": "0193a1c7-2f00-7000-8000-000000000001",
+      "type": "file.available",
+      "fileId": "0193a1c7-2f00-7000-8000-0000000000aa",
+      "fileName": "foto.jpg",
+      "mimeType": "image/jpeg",
+      "size": 1234
+    }
+  },
+  "uploadToken": {
+    "apiKey": "fsk_test_vector_key",
+    "cases": [
+      {
+        "id": "0193a1c7-2f00-7000-8000-0000000000aa",
+        "ownerRef": "user_1",
+        "exp": 1731336400,
+        "token": "1731336400.2f233202f96da62e3f1645ab77dd612df651ae19dad56e246bcb2f120b4e7d3a"
+      },
+      {
+        "id": "0193a1c7-2f00-7000-8000-0000000000bb",
+        "ownerRef": "otro@ejemplo.com",
+        "exp": 1999999999,
+        "token": "1999999999.f0c66552d2ba466abe9aa8f4c0639c79c68222c01e0e604b02d897c4c2fe1402"
+      }
+    ]
+  }
+}

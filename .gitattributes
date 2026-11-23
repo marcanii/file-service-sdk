@@ -1,0 +1,8 @@
+# El zip que descarga Composer (`composer require ntropix/file-service`) solo trae el SDK de PHP.
+/js          export-ignore
+/python      export-ignore
+/go          export-ignore
+/testdata    export-ignore
+/php/tests   export-ignore
+/.gitattributes export-ignore
+/.github     export-ignore

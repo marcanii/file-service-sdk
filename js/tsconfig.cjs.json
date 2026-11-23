@@ -1,0 +1,9 @@
+{
+  // Build CommonJS (para require(): NestJS por defecto, Node 18, yarn PnP). El ESM sale de tsconfig.json.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "CommonJS",
+    "moduleResolution": "Node10",
+    "outDir": "dist/cjs"
+  }
+}

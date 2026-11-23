@@ -1,0 +1,25 @@
+{
+    "name": "ntropix/file-service",
+    "description": "SDK de PHP del File Service de ntropix: subidas directas al storage, descargas firmadas y webhooks verificados.",
+    "type": "library",
+    "license": "MIT",
+    "keywords": ["file-upload", "s3", "minio", "presigned-url", "webhooks", "ntropix"],
+    "homepage": "https://github.com/marcanii/file-service-sdk",
+    "support": {
+        "issues": "https://github.com/marcanii/file-service-sdk/issues",
+        "source": "https://github.com/marcanii/file-service-sdk"
+    },
+    "require": {
+        "php": ">=8.1",
+        "ext-curl": "*",
+        "ext-json": "*"
+    },
+    "autoload": {
+        "psr-4": {
+            "Ntropix\\FileService\\": "php/src/"
+        }
+    },
+    "config": {
+        "sort-packages": true
+    }
+}

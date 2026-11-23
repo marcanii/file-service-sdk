@@ -1,0 +1,374 @@
+openapi: 3.1.0
+info:
+  title: ntropix File Service
+  version: "1.0.0"
+  license:
+    name: MIT (SDKs)
+    identifier: MIT
+  description: |
+    Almacenamiento de archivos para los Proyectos de ntropix. Los bytes viajan **directo** entre el
+    navegador y el storage con URLs firmadas; la API solo maneja metadatos y el ciclo de vida.
+    Cada archivo se verifica antes de quedar disponible (SHA-256, tipo real del contenido,
+    deduplicación).
+
+    ## Integración rápida
+
+    Tu backend monta **un endpoint de subida** con el SDK de su lenguaje y el navegador llama a
+    `upload()`. La API key nunca llega al navegador.
+
+    | Lenguaje | Instalar | Endpoint de subida |
+    |---|---|---|
+    | Node (Next.js, NestJS, Express) | `npm i @ntropix/file-service` | `createUploadRoute(fs, { auth })` / `fs.handleUpload(body, { ownerRef })` |
+    | Python (FastAPI, Django, Flask) | `pip install ntropix-file-service` | `fs.handle_upload(body, owner_ref=...)` |
+    | Go (net/http, gin, echo) | `go get github.com/marcanii/file-service-sdk/go` | `client.UploadHandler(auth, opts)` |
+    | PHP (Laravel, Symfony) | `composer require ntropix/file-service` | `$fs->handleUpload($body, ownerRef: ...)` |
+
+    En el navegador, con cualquier backend:
+
+    ```js
+    import { upload } from "@ntropix/file-service/browser";
+    const file = await upload(input.files[0], { endpoint: "/api/files", onProgress: (p) => console.log(p.percent) });
+    ```
+
+    Guías y ejemplos por framework: <https://github.com/marcanii/file-service-sdk>.
+
+    ## Convenciones
+
+    - **Autenticación**: `Authorization: Bearer <api-key>` (`fsk_live_…` / `fsk_test_…`), emitida en
+      el Panel. Identifica al Proyecto; scopes `full` y `read`.
+    - **`FS-Actor`** (opcional): id del Usuario final que origina la acción. Solo se audita.
+    - **Errores**: `{"error": {"code", "message"}}`. `code` es estable.
+    - Un file de otro Proyecto responde `404`, igual que uno inexistente.
+
+    ## Ciclo de vida
+
+    `PENDING` → `UPLOADING` (multipart) → `READY` (bytes confirmados) → **`AVAILABLE`** (verificado,
+    descargable). Salidas laterales: `FAILED` (corrupto) y `QUARANTINED` (el tipo real no está
+    permitido).
+
+    ## Webhooks
+
+    Eventos `file.available`, `file.failed`, `file.quarantined` (se configuran en el Panel).
+    Header `FS-Signature: t=<unix>,v1=<hex(HMAC-SHA256(secret, "<t>.<body crudo>"))>`; rechazar si
+    `t` tiene más de 5 minutos. Entrega *at-least-once*: deduplicar por `id`. Los SDKs lo verifican
+    con `verifyWebhook`.
+servers:
+  - url: /
+    description: Este servidor
+tags:
+  - name: Subida
+    description: Iniciar, firmar partes y cerrar una subida directa al storage.
+  - name: Archivos
+    description: Consultar, listar, cambiar visibilidad y papelera.
+  - name: Público
+    description: URLs estables de archivos públicos, sin autenticación.
+  - name: Salud
+    description: Liveness y readiness.
+security:
+  - apiKey: []
+
+paths:
+  /files:
+    post:
+      tags: [Subida]
+      operationId: createUpload
+      summary: Iniciar una subida
+      description: |
+        Crea el file en `PENDING` y devuelve cómo subir los bytes. Menos de 32 MB → `simple` (un PUT
+        a `upload.url` con `upload.headers`); más → `multipart` (pedir URLs con `/files/{id}/parts`).
+      parameters: [{ $ref: "#/components/parameters/Actor" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateUploadRequest" }
+      responses:
+        "201":
+          description: Subida iniciada
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CreatedUpload" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "413": { $ref: "#/components/responses/Error" }
+        "415": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+        "507": { $ref: "#/components/responses/Error" }
+    get:
+      tags: [Archivos]
+      operationId: listFiles
+      summary: Listar archivos
+      description: Del más nuevo al más viejo, paginado por cursor. No incluye URLs de descarga.
+      parameters:
+        - { name: owner_ref, in: query, schema: { type: string } }
+        - { name: status, in: query, schema: { $ref: "#/components/schemas/Status" } }
+        - { name: trashed, in: query, description: "`true` lista la papelera", schema: { type: boolean } }
+        - { name: cursor, in: query, description: "`next_cursor` de la página anterior", schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 50 } }
+      responses:
+        "200":
+          description: Una página
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [files]
+                properties:
+                  files: { type: array, items: { $ref: "#/components/schemas/File" } }
+                  next_cursor: { type: string }
+        "401": { $ref: "#/components/responses/Error" }
+
+  /files/{id}/parts:
+    post:
+      tags: [Subida]
+      operationId: signParts
+      summary: Firmar URLs de partes (multipart)
+      description: Hasta 100 partes por llamada. Cada parte se sube con `PUT <url>`; guardar el header `ETag`.
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [part_numbers]
+              properties:
+                part_numbers: { type: array, items: { type: integer, minimum: 1 }, maxItems: 100 }
+      responses:
+        "200":
+          description: URLs firmadas
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  urls:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        part_number: { type: integer }
+                        url: { type: string, format: uri }
+                  expires_at: { type: string, format: date-time }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /files/{id}/complete:
+    post:
+      tags: [Subida]
+      operationId: complete
+      summary: Cerrar la subida
+      description: |
+        Verifica con un `HEAD` real que los bytes estén en el storage y deja el file en `READY`; el
+        worker lo verifica y lo pasa a `AVAILABLE`, `FAILED` o `QUARANTINED`. Idempotente. En
+        subida simple va sin body.
+      parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/Actor" }]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                parts:
+                  type: array
+                  items:
+                    type: object
+                    required: [part_number, etag]
+                    properties:
+                      part_number: { type: integer }
+                      etag: { type: string }
+      responses:
+        "200": { $ref: "#/components/responses/File" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "413": { $ref: "#/components/responses/Error" }
+
+  /files/{id}:
+    get:
+      tags: [Archivos]
+      operationId: getFile
+      summary: Metadatos y URL de descarga
+      description: "`download` solo aparece si el file está `AVAILABLE` y fuera de la papelera. Cada emisión se audita."
+      parameters:
+        - { $ref: "#/components/parameters/Id" }
+        - { $ref: "#/components/parameters/Actor" }
+        - name: disposition
+          in: query
+          description: "`inline` para mostrar en el navegador (imágenes, video, audio, PDF)."
+          schema: { type: string, enum: [attachment, inline] }
+      responses:
+        "200": { $ref: "#/components/responses/File" }
+        "404": { $ref: "#/components/responses/Error" }
+    patch:
+      tags: [Archivos]
+      operationId: updateFile
+      summary: Cambiar visibilidad o nombre
+      parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/Actor" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                visibility: { $ref: "#/components/schemas/Visibility" }
+                original_name: { type: string, maxLength: 255 }
+      responses:
+        "200": { $ref: "#/components/responses/File" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      tags: [Archivos]
+      operationId: deleteFile
+      summary: Mandar a la papelera
+      description: Borrado lógico, recuperable durante los días de papelera del Proyecto.
+      parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/Actor" }]
+      responses:
+        "204": { description: En la papelera }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /files/{id}/restore:
+    post:
+      tags: [Archivos]
+      operationId: restoreFile
+      summary: Recuperar de la papelera
+      parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/Actor" }]
+      responses:
+        "200": { $ref: "#/components/responses/File" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /p/{id}/{name}:
+    get:
+      tags: [Público]
+      operationId: publicFile
+      summary: URL estable de un archivo público
+      description: Sin autenticación. `302` a una URL firmada corta; `404` si el file no es público, no está disponible o está en la papelera.
+      security: []
+      parameters:
+        - { $ref: "#/components/parameters/Id" }
+        - { name: name, in: path, required: true, description: Decorativo, schema: { type: string } }
+      responses:
+        "302": { description: Redirección a la URL firmada }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /healthz:
+    get:
+      tags: [Salud]
+      operationId: healthz
+      summary: Liveness
+      security: []
+      responses:
+        "200": { description: OK }
+  /readyz:
+    get:
+      tags: [Salud]
+      operationId: readyz
+      summary: Readiness (Postgres y storage)
+      security: []
+      responses:
+        "200": { description: Listo }
+        "503": { $ref: "#/components/responses/Error" }
+
+components:
+  securitySchemes:
+    apiKey:
+      type: http
+      scheme: bearer
+      description: API key del Proyecto (`fsk_live_…` / `fsk_test_…`).
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    Actor:
+      name: FS-Actor
+      in: header
+      required: false
+      description: Id del Usuario final que origina la acción (solo auditoría).
+      schema: { type: string }
+  responses:
+    File:
+      description: El archivo
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/File" }
+    Error:
+      description: Error
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+  schemas:
+    Status:
+      type: string
+      enum: [PENDING, UPLOADING, READY, AVAILABLE, FAILED, QUARANTINED]
+    Visibility:
+      type: string
+      enum: [private, public]
+      default: private
+    CreateUploadRequest:
+      type: object
+      required: [original_name, mime_type, size_bytes]
+      properties:
+        original_name: { type: string, maxLength: 255, description: Sin separadores de ruta }
+        mime_type: { type: string, description: Tipo declarado; el real lo verifica el worker }
+        size_bytes: { type: integer, minimum: 1, description: Tamaño exacto; el storage rechaza otro }
+        owner_ref: { type: string, description: Id opaco del Usuario final en el sistema del Proyecto }
+        visibility: { $ref: "#/components/schemas/Visibility" }
+        metadata: { type: object, additionalProperties: true, description: "JSON libre, hasta 16 KB" }
+    UploadInstructions:
+      type: object
+      required: [mode, expires_at]
+      properties:
+        mode: { type: string, enum: [simple, multipart] }
+        url: { type: string, format: uri, description: "simple: URL del PUT" }
+        headers: { type: object, additionalProperties: { type: string }, description: "simple: headers del PUT" }
+        part_size: { type: integer, description: "multipart: bytes por parte (la última puede ser menor)" }
+        part_count: { type: integer, description: "multipart: cantidad de partes" }
+        expires_at: { type: string, format: date-time }
+    CreatedUpload:
+      type: object
+      required: [id, status, upload]
+      properties:
+        id: { type: string, format: uuid }
+        status: { $ref: "#/components/schemas/Status" }
+        upload: { $ref: "#/components/schemas/UploadInstructions" }
+    File:
+      type: object
+      required: [id, project, status, original_name, mime_type, size_bytes, visibility, metadata, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        project: { type: string, description: Slug del Proyecto }
+        status: { $ref: "#/components/schemas/Status" }
+        original_name: { type: string }
+        mime_type: { type: string, description: "Una vez AVAILABLE, el tipo REAL detectado" }
+        size_bytes: { type: integer }
+        content_hash: { type: string, description: SHA-256 del contenido }
+        owner_ref: { type: string }
+        visibility: { $ref: "#/components/schemas/Visibility" }
+        public_url: { type: string, format: uri, description: "Solo si es público y AVAILABLE" }
+        metadata: { type: object, additionalProperties: true }
+        created_at: { type: string, format: date-time }
+        deleted_at: { type: string, format: date-time, description: Presente si está en la papelera }
+        download:
+          type: object
+          description: "Solo en GET /files/{id}, si está AVAILABLE"
+          properties:
+            url: { type: string, format: uri }
+            expires_at: { type: string, format: date-time }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum: [validation, unauthorized, forbidden, project_disabled, not_found, invalid_state, no_bytes,
+                     too_large, type_not_allowed, rate_limited, quota_exceeded, storage_full, internal, not_ready]
+            message: { type: string }
