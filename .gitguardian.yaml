@@ -1,0 +1,7 @@
+# GitGuardian: los vectores de prueba compartidos por los SDKs contienen HMACs calculados con keys
+# FALSAS (fsk_test_vector_key, whsec_vector_secret). Son valores esperados de tests, no secretos.
+# Autorizado explícitamente por el dueño del repo (PR #2). Todo lo demás se sigue escaneando.
+version: 2
+secret:
+  ignored_paths:
+    - "**/testdata/vectors.json"
