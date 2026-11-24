@@ -24,9 +24,21 @@ jobs:
       - run: npm install -g npm@^11.5.1 && npm --version
       - name: La versión del tag coincide con package.json
         run: test "js/v$(node -p 'require("./package.json").version')" = "${GITHUB_REF_NAME}"
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm build && pnpm test
-      - run: npm publish --provenance --access public
+      # Idempotente: si esa versión ya está en npm (p. ej. publicada a mano), no se reintenta.
+      - name: ¿Ya está publicada?
+        id: published
+        run: |
+          v=$(node -p 'require("./package.json").version')
+          if npm view "@ntropix/file-service@$v" version >/dev/null 2>&1; then
+            echo "@ntropix/file-service@$v ya está en npm: nada que publicar"
+            echo "done=true" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.published.outputs.done != 'true'
+        run: pnpm install --frozen-lockfile
+      - if: steps.published.outputs.done != 'true'
+        run: pnpm build && pnpm test
+      - if: steps.published.outputs.done != 'true'
+        run: npm publish --provenance --access public
 
   pypi:
     if: startsWith(github.ref_name, 'python/v')
