@@ -5,6 +5,10 @@ SDKs cambian en el mismo PR y el e2e los prueba juntos. No editar acá directame
 
 ## Configuración única
 
+**Hoy se publica solo npm.** Python y PHP se instalan desde GitHub con el tag `vX.Y.Z` (ver sus
+README); Go siempre se instala desde GitHub. PyPI y Packagist quedan configurables abajo para
+cuando se necesiten.
+
 npm y PyPI publican con **trusted publishing (OIDC)**: GitHub Actions se identifica ante el registry y
 publica sin ningún token guardado en el repo (npm revocó los tokens clásicos en diciembre de 2025).
 
@@ -26,15 +30,15 @@ Los cambios llegan por PR a `develop` (desde la fuente de verdad) y se publican 
 
 | SDK | Versión en | Tag |
 |---|---|---|
-| JS | `js/package.json` | `js/v1.2.3` |
-| Python | `python/pyproject.toml` | `python/v1.2.3` |
+| JS | `js/package.json` | `js/v1.2.3` → publica en npm (si la versión ya está, el workflow no hace nada) |
+| Python | `python/pyproject.toml` | `v1.2.3` (instalación desde GitHub). `python/v1.2.3` solo cuando se publique en PyPI |
 | Go | — | `go/v1.2.3` |
-| PHP | — | `v1.2.3` (Packagist solo entiende tags sin prefijo) |
+| PHP | — | `v1.2.3` (Composer y Packagist solo entienden tags sin prefijo) |
 
 ```bash
 git checkout main && git pull
-git tag js/v1.1.0 && git tag python/v1.1.0 && git tag go/v1.1.0 && git tag v1.1.0
-git push origin js/v1.1.0 python/v1.1.0 go/v1.1.0 v1.1.0
+git tag js/v1.1.0 && git tag go/v1.1.0 && git tag v1.1.0
+git push origin js/v1.1.0 go/v1.1.0 v1.1.0
 
 # opcional: que pkg.go.dev lo indexe enseguida
 GOPROXY=https://proxy.golang.org go list -m github.com/marcanii/file-service-sdk/go@v1.1.0
