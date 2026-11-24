@@ -13,7 +13,7 @@ Composer toma la versión de los tags (`v1.1.0`).
 
 ```json
 {
-  "repositories": [{ "type": "vcs", "url": "https://github.com/marcanii/file-service-sdk" }],
+  "repositories": [{ "type": "vcs", "url": "https://github.com/ntropix/file-service-sdk" }],
   "require": { "ntropix/file-service": "^1.1" }
 }
 ```
