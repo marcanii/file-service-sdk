@@ -157,6 +157,7 @@ try {
 } catch (FileServiceException $e) {
     // $e->status (0 si no hubo respuesta) y $e->errorCode: not_found, too_large,
     // type_not_allowed, quota_exceeded, rate_limited, network, timeout…
+    // $e->requestId: X-Request-ID de la respuesta (null si no hubo); incluilo al reportar.
 }
 ```
 

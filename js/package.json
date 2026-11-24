@@ -1,6 +1,6 @@
 {
   "name": "@ntropix/file-service",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "SDK del File Service de ntropix: subir, consultar y servir archivos. Cliente de servidor (Node, Next.js, NestJS) y helper de navegador.",
   "keywords": [
     "file-upload",

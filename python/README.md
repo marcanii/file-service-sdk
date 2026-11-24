@@ -138,7 +138,8 @@ Rechaza firmas inválidas y eventos con más de `tolerance=300` segundos.
 ## Errores
 
 `FileServiceError(status, code, message)`: `status` es el HTTP (0 si no hubo respuesta) y `code`
-es estable.
+es estable. `err.request_id` trae el `X-Request-ID` de la respuesta (`None` en `network` /
+`timeout`): logueálo e incluilo al reportar un problema.
 
 | status | `code` | Cuándo |
 |---|---|---|

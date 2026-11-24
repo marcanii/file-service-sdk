@@ -10,6 +10,7 @@ import { toFileInfo, toUploadInstructions, } from "./types.js";
 export class FileServiceError extends Error {
     status;
     code;
+    requestId;
     constructor(message, 
     /** Status HTTP (0 si no hubo respuesta). */
     status, 
@@ -18,10 +19,16 @@ export class FileServiceError extends Error {
      * `invalid_state` · `no_bytes` · `too_large` · `type_not_allowed` · `quota_exceeded` ·
      * `storage_full` · `rate_limited` · `internal` · `network` · `timeout`
      */
-    code) {
+    code, 
+    /**
+     * `X-Request-ID` de la respuesta: incluilo al reportar un problema. `undefined` si no hubo
+     * respuesta del File Service (`network`, `timeout`).
+     */
+    requestId) {
         super(message);
         this.status = status;
         this.code = code;
+        this.requestId = requestId;
         this.name = "FileServiceError";
     }
 }
@@ -442,7 +449,7 @@ export class FileService {
             }
             if (res.ok)
                 return json;
-            lastError = new FileServiceError(json?.error?.message ?? `respuesta inesperada del File Service (HTTP ${res.status})`, res.status, json?.error?.code ?? "internal");
+            lastError = new FileServiceError(json?.error?.message ?? `respuesta inesperada del File Service (HTTP ${res.status})`, res.status, json?.error?.code ?? "internal", res.headers.get("x-request-id") ?? undefined);
             const retryable = res.status === 429 || res.status >= 500;
             if (!retryable || attempt === attempts)
                 throw lastError;

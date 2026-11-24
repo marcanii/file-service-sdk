@@ -133,7 +133,7 @@ http.HandleFunc("POST /webhooks/files", func(w http.ResponseWriter, r *http.Requ
 ## Errores
 
 ```go
-var apiErr *fileservice.Error      // Status, Code, Message
+var apiErr *fileservice.Error      // Status, Code, Message, RequestID
 var rejected *fileservice.RejectedError // File: quedó QUARANTINED o FAILED
 switch {
 case errors.As(err, &rejected):
@@ -147,6 +147,9 @@ case errors.As(err, &apiErr) && apiErr.Code == fileservice.CodeNotFound:
 `no_bytes`, `too_large`, `type_not_allowed`, `quota_exceeded`, `storage_full`, `rate_limited`,
 `internal`, y los del SDK `network` / `timeout` (Status 0) y `storage_rejected`.
 `RejectedError` también se ve como `*Error` 422 (`quarantined` / `failed`).
+
+`RequestID` es el `X-Request-ID` de la respuesta (vacío en `network` / `timeout`) y aparece en
+`err.Error()`: logueálo e incluilo al reportar un problema.
 
 ## Tests
 
