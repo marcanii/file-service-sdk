@@ -53,7 +53,7 @@ UploadData = Union[bytes, bytearray, memoryview, str, "os.PathLike[str]", Binary
 PartsInput = Iterable[Union[CompletedPart, Mapping[str, Any], Tuple[int, str]]]
 
 _MAX_PARTS_PER_REQUEST = 100
-_USER_AGENT = "ntropix-file-service-python/1.0.0"
+_USER_AGENT = "ntropix-file-service-python/1.1.0"
 
 
 def _strip_quotes(etag: str) -> str:
@@ -612,6 +612,7 @@ class FileService:
                     status,
                     str(err_obj.get("code") or "internal"),
                     str(err_obj.get("message") or f"respuesta inesperada del File Service (HTTP {status})"),
+                    (exc.headers.get("X-Request-ID") if exc.headers else None) or None,
                 )
                 if not (status == 429 or status >= 500):
                     raise last from None

@@ -8,8 +8,18 @@ backend que resuelve `handleUpload()` (protocolo en [`PROTOCOL.md`](../PROTOCOL.
 
 ## Instalación
 
+Por ahora no está en Packagist: se instala desde GitHub declarando el repo en tu `composer.json`.
+Composer toma la versión de los tags (`v1.1.0`).
+
+```json
+{
+  "repositories": [{ "type": "vcs", "url": "https://github.com/marcanii/file-service-sdk" }],
+  "require": { "ntropix/file-service": "^1.1" }
+}
+```
+
 ```bash
-composer require ntropix/file-service
+composer update ntropix/file-service
 ```
 
 ```bash
@@ -157,6 +167,7 @@ try {
 } catch (FileServiceException $e) {
     // $e->status (0 si no hubo respuesta) y $e->errorCode: not_found, too_large,
     // type_not_allowed, quota_exceeded, rate_limited, network, timeout…
+    // $e->requestId: X-Request-ID de la respuesta (null si no hubo); incluilo al reportar.
 }
 ```
 

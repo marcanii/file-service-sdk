@@ -101,6 +101,11 @@ export class FileServiceError extends Error {
      * `storage_full` · `rate_limited` · `internal` · `network` · `timeout`
      */
     readonly code: string,
+    /**
+     * `X-Request-ID` de la respuesta: incluilo al reportar un problema. `undefined` si no hubo
+     * respuesta del File Service (`network`, `timeout`).
+     */
+    readonly requestId?: string,
   ) {
     super(message);
     this.name = "FileServiceError";
@@ -571,6 +576,7 @@ export class FileService {
         json?.error?.message ?? `respuesta inesperada del File Service (HTTP ${res.status})`,
         res.status,
         json?.error?.code ?? "internal",
+        res.headers.get("x-request-id") ?? undefined,
       );
       const retryable = res.status === 429 || res.status >= 500;
       if (!retryable || attempt === attempts) throw lastError;

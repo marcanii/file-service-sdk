@@ -17,15 +17,18 @@ namespace Ntropix\FileService;
 class FileServiceException extends \RuntimeException
 {
     /**
-     * @param int    $status    Status HTTP (0 si no hubo respuesta).
-     * @param string $errorCode Código estable del error.
-     * @param string $message   Mensaje legible (en español).
+     * @param int         $status    Status HTTP (0 si no hubo respuesta).
+     * @param string      $errorCode Código estable del error.
+     * @param string      $message   Mensaje legible (en español).
+     * @param string|null $requestId `X-Request-ID` de la respuesta: incluilo al reportar un
+     *                               problema. `null` si no hubo respuesta (`network`, `timeout`).
      */
     public function __construct(
         public readonly int $status,
         public readonly string $errorCode,
         string $message,
         ?\Throwable $previous = null,
+        public readonly ?string $requestId = null,
     ) {
         parent::__construct($message, $status, $previous);
     }

@@ -19,9 +19,9 @@ info:
     | Lenguaje | Instalar | Endpoint de subida |
     |---|---|---|
     | Node (Next.js, NestJS, Express) | `npm i @ntropix/file-service` | `createUploadRoute(fs, { auth })` / `fs.handleUpload(body, { ownerRef })` |
-    | Python (FastAPI, Django, Flask) | `pip install ntropix-file-service` | `fs.handle_upload(body, owner_ref=...)` |
+    | Python (FastAPI, Django, Flask) | desde GitHub (ver su README) | `fs.handle_upload(body, owner_ref=...)` |
     | Go (net/http, gin, echo) | `go get github.com/marcanii/file-service-sdk/go` | `client.UploadHandler(auth, opts)` |
-    | PHP (Laravel, Symfony) | `composer require ntropix/file-service` | `$fs->handleUpload($body, ownerRef: ...)` |
+    | PHP (Laravel, Symfony) | desde GitHub, repo VCS en Composer (ver su README) | `$fs->handleUpload($body, ownerRef: ...)` |
 
     En el navegador, con cualquier backend:
 
@@ -38,6 +38,9 @@ info:
       el Panel. Identifica al Proyecto; scopes `full` y `read`.
     - **`FS-Actor`** (opcional): id del Usuario final que origina la acción. Solo se audita.
     - **Errores**: `{"error": {"code", "message"}}`. `code` es estable.
+    - **`X-Request-ID`**: toda respuesta lo trae; incluilo al reportar un problema. Si el request
+      manda uno propio (1–64 caracteres de `A-Z a-z 0-9 . _ -`), se respeta para correlacionar con
+      tus logs; si no, el servicio genera un UUIDv7. Los SDKs lo exponen en sus errores.
     - Un file de otro Proyecto responde `404`, igual que uno inexistente.
 
     ## Ciclo de vida
@@ -290,14 +293,22 @@ components:
       required: false
       description: Id del Usuario final que origina la acción (solo auditoría).
       schema: { type: string }
+  headers:
+    RequestId:
+      description: Identificador del request para soporte; está en toda respuesta.
+      schema: { type: string, maxLength: 64 }
   responses:
     File:
       description: El archivo
+      headers:
+        X-Request-ID: { $ref: "#/components/headers/RequestId" }
       content:
         application/json:
           schema: { $ref: "#/components/schemas/File" }
     Error:
       description: Error
+      headers:
+        X-Request-ID: { $ref: "#/components/headers/RequestId" }
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }

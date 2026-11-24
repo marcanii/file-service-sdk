@@ -255,6 +255,10 @@ T::test('sin conexión con el File Service → 502 network', function () use ($k
     $r = $down->handleUpload(['action' => 'create', 'name' => 'a.txt', 'mimeType' => 'text/plain', 'size' => 1], 'user_1');
     T::eq(502, $r->status);
     T::eq('network', $r->body['error']['code']);
+    T::throws(FileServiceException::class, fn () => $down->get('f1'), function (FileServiceException $e): void {
+        T::eq('network', $e->errorCode);
+        T::eq(null, $e->requestId);
+    });
 });
 
 T::test('UploadResult::send emite el JSON', function (): void {
@@ -280,6 +284,7 @@ T::test('errores tipados y FileRejectedException en wait', function () use ($fs)
     T::throws(FileServiceException::class, fn () => $fs->get('missing'), function (FileServiceException $e): void {
         T::eq(404, $e->status);
         T::eq('not_found', $e->errorCode);
+        T::eq('req-123', $e->requestId);
     });
     T::throws(FileRejectedException::class, fn () => $fs->complete('quar', wait: 2), function (FileRejectedException $e): void {
         T::eq('quarantined', $e->errorCode);

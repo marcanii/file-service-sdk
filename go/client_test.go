@@ -87,6 +87,24 @@ func TestErrors_NotFoundNotRetried(t *testing.T) {
 	}
 }
 
+func TestErrors_ExposeRequestID(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Request-ID", "req-123")
+		apiError(w, 404, "not_found", "file no encontrado")
+	}))
+	_, err := c.Get(context.Background(), "f1", GetOptions{})
+	var apiErr *Error
+	if !errors.As(err, &apiErr) || apiErr.RequestID != "req-123" {
+		t.Fatalf("err = %#v, quiero RequestID req-123", err)
+	}
+
+	offline, _ := New(Config{APIKey: "k", BaseURL: "http://127.0.0.1:9", Retries: -1})
+	_, err = offline.Get(context.Background(), "f1", GetOptions{})
+	if !errors.As(err, &apiErr) || apiErr.Code != CodeNetwork || apiErr.RequestID != "" {
+		t.Fatalf("sin respuesta no hay Request ID: %#v", err)
+	}
+}
+
 func TestTimeoutPerRequest(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(200 * time.Millisecond)

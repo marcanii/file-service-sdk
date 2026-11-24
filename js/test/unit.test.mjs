@@ -49,6 +49,28 @@ test("los errores de la API llegan como FileServiceError con code y status", asy
   });
 });
 
+test("los errores de la API exponen el X-Request-ID; los de red no tienen", async () => {
+  const fs = new FileService({
+    apiKey: "fsk_test_x", baseUrl: "http://fs.test", retries: 0,
+    fetch: async () => new Response(JSON.stringify({ error: { code: "internal", message: "error interno" } }),
+      { status: 500, headers: { "x-request-id": "01a20e8f-5540-7791-a25a-9e0e76d34ceb" } }),
+  });
+  await assert.rejects(fs.get("f1"), (err) => {
+    assert.equal(err.requestId, "01a20e8f-5540-7791-a25a-9e0e76d34ceb");
+    return true;
+  });
+
+  const offline = new FileService({
+    apiKey: "fsk_test_x", baseUrl: "http://fs.test", retries: 0,
+    fetch: async () => { throw new TypeError("fetch failed"); },
+  });
+  await assert.rejects(offline.get("f1"), (err) => {
+    assert.equal(err.code, "network");
+    assert.equal(err.requestId, undefined);
+    return true;
+  });
+});
+
 test("reintenta 5xx en operaciones idempotentes, pero no al crear", async () => {
   let calls = 0;
   const flaky = async () => (++calls < 3 ? new Response("{}", { status: 503 }) : new Response(JSON.stringify({ files: [] }), { status: 200 }));
