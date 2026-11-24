@@ -1,5 +1,6 @@
 # Publica cada SDK al empujar su tag (ver RELEASING.md). Go y PHP no necesitan workflow:
 # go get lee de GitHub y Packagist se actualiza con su hook.
+# npm y PyPI publican con trusted publishing (OIDC): sin tokens guardados en el repo.
 name: publish
 
 on:
@@ -10,20 +11,22 @@ jobs:
   npm:
     if: startsWith(github.ref_name, 'js/v')
     runs-on: ubuntu-latest
-    permissions: { contents: read, id-token: write }
+    permissions: { contents: read, id-token: write }   # trusted publishing (OIDC), sin tokens
     defaults: { run: { working-directory: js } }
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
         with: { version: 9 }
       - uses: actions/setup-node@v4
-        with: { node-version: 22, registry-url: "https://registry.npmjs.org" }
+        with: { node-version: 24, registry-url: "https://registry.npmjs.org" }
+      # Trusted publishing exige npm >= 11.5.1 (el npm de Node 22, y el de los primeros Node 24, no
+      # hacen el canje OIDC): se fija explícitamente en vez de depender del que traiga Node.
+      - run: npm install -g npm@^11.5.1 && npm --version
       - name: La versión del tag coincide con package.json
         run: test "js/v$(node -p 'require("./package.json").version')" = "${GITHUB_REF_NAME}"
       - run: pnpm install --frozen-lockfile
       - run: pnpm build && pnpm test
       - run: npm publish --provenance --access public
-        env: { NODE_AUTH_TOKEN: "${{ secrets.NPM_TOKEN }}" }
 
   pypi:
     if: startsWith(github.ref_name, 'python/v')
