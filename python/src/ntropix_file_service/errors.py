@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Optional
+
 from .models import FileInfo
 
 __all__ = ["FileServiceError", "FileRejectedError", "WebhookSignatureError"]
@@ -14,13 +16,17 @@ class FileServiceError(Exception):
     `project_disabled` · `not_found` · `validation` · `invalid_state` · `no_bytes` · `too_large` ·
     `type_not_allowed` · `quota_exceeded` · `storage_full` · `rate_limited` · `internal` ·
     `storage_rejected` · `network` · `timeout`.
+
+    `request_id` es el `X-Request-ID` de la respuesta: incluilo al reportar un problema. `None` si
+    no hubo respuesta del File Service (`network`, `timeout`).
     """
 
-    def __init__(self, status: int, code: str, message: str) -> None:
+    def __init__(self, status: int, code: str, message: str, request_id: Optional[str] = None) -> None:
         super().__init__(message)
         self.status = status
         self.code = code
         self.message = message
+        self.request_id = request_id
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}(status={self.status!r}, code={self.code!r}, message={self.message!r})"

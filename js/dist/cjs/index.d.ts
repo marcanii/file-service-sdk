@@ -73,6 +73,11 @@ export declare class FileServiceError extends Error {
      * `storage_full` · `rate_limited` · `internal` · `network` · `timeout`
      */
     readonly code: string;
+    /**
+     * `X-Request-ID` de la respuesta: incluilo al reportar un problema. `undefined` si no hubo
+     * respuesta del File Service (`network`, `timeout`).
+     */
+    readonly requestId?: string | undefined;
     constructor(message: string, 
     /** Status HTTP (0 si no hubo respuesta). */
     status: number, 
@@ -81,7 +86,12 @@ export declare class FileServiceError extends Error {
      * `invalid_state` · `no_bytes` · `too_large` · `type_not_allowed` · `quota_exceeded` ·
      * `storage_full` · `rate_limited` · `internal` · `network` · `timeout`
      */
-    code: string);
+    code: string, 
+    /**
+     * `X-Request-ID` de la respuesta: incluilo al reportar un problema. `undefined` si no hubo
+     * respuesta del File Service (`network`, `timeout`).
+     */
+    requestId?: string | undefined);
 }
 /** El archivo se subió pero el servicio lo rechazó al verificarlo (FAILED o QUARANTINED). */
 export declare class FileRejectedError extends FileServiceError {

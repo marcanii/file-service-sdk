@@ -291,6 +291,17 @@ class ClientTest(unittest.TestCase):
         self.assertEqual(req["path"], "/files/x%2Fy")
         self.assertEqual(req["headers"]["fs-actor"], "user_9")
 
+    def test_api_error_exposes_request_id_network_error_does_not(self) -> None:
+        self.api.reply(404, {"error": {"code": "not_found", "message": "no existe"}}, {"X-Request-ID": "req-123"})
+        with self.assertRaises(FileServiceError) as ctx:
+            self.fs.get("f1")
+        self.assertEqual(ctx.exception.request_id, "req-123")
+
+        offline = FileService(api_key=API_KEY, base_url="http://127.0.0.1:9", timeout=2, retries=0)
+        with self.assertRaises(FileServiceError) as ctx:
+            offline.get("f1")
+        self.assertEqual((ctx.exception.code, ctx.exception.request_id), ("network", None))
+
     def test_list_iter_all_update_delete(self) -> None:
         self.api.reply(200, {"files": [api_file()], "next_cursor": "c1"})
         self.api.reply(200, {"files": [api_file()], "next_cursor": ""})

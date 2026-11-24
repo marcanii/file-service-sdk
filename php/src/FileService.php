@@ -699,6 +699,7 @@ final class FileService
                 is_string($err['message'] ?? null)
                     ? $err['message']
                     : "respuesta inesperada del File Service (HTTP {$status})",
+                requestId: ($res['headers']['x-request-id'] ?? '') !== '' ? $res['headers']['x-request-id'] : null,
             );
             if (($status !== 429 && $status < 500) || $attempt >= $attempts) {
                 throw $e;

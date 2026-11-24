@@ -127,7 +127,7 @@ if (preg_match('#^/files/([^/]+)(/[a-z]+)?$#', $path, $m) === 1) {
         if ($id === 'ratelimited' && hit($state, "get-{$id}") === 1) {
             fail(429, 'rate_limited', ['Retry-After: 1']);
         } elseif ($id === 'missing') {
-            fail(404, 'not_found');
+            fail(404, 'not_found', ['X-Request-ID: req-123']);
         } elseif ($id === 'quar') {
             reply(200, file_json($id, 'QUARANTINED'));
         } elseif ($id === 'slow') {

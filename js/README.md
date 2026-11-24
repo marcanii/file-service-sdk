@@ -193,6 +193,9 @@ Todo error de la API es un `FileServiceError` con `status` (HTTP) y `code` estab
 El SDK reintenta automáticamente (con backoff) errores de red, `429` y `5xx` en las operaciones que
 son seguras de repetir. `createUpload` no se reintenta.
 
+`err.requestId` trae el `X-Request-ID` de la respuesta (`undefined` en `network` / `timeout`):
+logueálo e incluilo al reportar un problema, así se encuentra el request en los logs del servicio.
+
 ## Webhooks
 
 En vez de (o además de) esperar con `wait`, el File Service puede avisarte cuando un archivo

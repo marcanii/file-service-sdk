@@ -138,6 +138,7 @@ func (c *Client) do(ctx context.Context, method, path string, body any, idempote
 			return nil
 		}
 		apiErr := parseAPIError(status, data)
+		apiErr.RequestID = header.Get("X-Request-ID")
 		retryable := status == http.StatusTooManyRequests || status >= 500
 		if !retryable || attempt == attempts {
 			return apiErr

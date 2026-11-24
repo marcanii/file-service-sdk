@@ -41,10 +41,16 @@ type Error struct {
 	Code string
 	// Message legible, en español.
 	Message string
+	// RequestID es el X-Request-ID de la respuesta: incluilo al reportar un problema. Vacío si no
+	// hubo respuesta del File Service (Code network o timeout).
+	RequestID string
 }
 
 // Error implementa la interfaz error.
 func (e *Error) Error() string {
+	if e.RequestID != "" {
+		return fmt.Sprintf("fileservice: %s (code=%s, status=%d, request_id=%s)", e.Message, e.Code, e.Status, e.RequestID)
+	}
 	return fmt.Sprintf("fileservice: %s (code=%s, status=%d)", e.Message, e.Code, e.Status)
 }
 
