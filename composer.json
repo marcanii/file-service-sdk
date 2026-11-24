@@ -4,10 +4,10 @@
     "type": "library",
     "license": "MIT",
     "keywords": ["file-upload", "s3", "minio", "presigned-url", "webhooks", "ntropix"],
-    "homepage": "https://github.com/marcanii/file-service-sdk",
+    "homepage": "https://github.com/ntropix/file-service-sdk",
     "support": {
-        "issues": "https://github.com/marcanii/file-service-sdk/issues",
-        "source": "https://github.com/marcanii/file-service-sdk"
+        "issues": "https://github.com/ntropix/file-service-sdk/issues",
+        "source": "https://github.com/ntropix/file-service-sdk"
     },
     "require": {
         "php": ">=8.1",

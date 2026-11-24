@@ -28,7 +28,7 @@ classifiers = [
 dependencies = []
 
 [project.urls]
-Source = "https://github.com/marcanii/file-service"
+Source = "https://github.com/ntropix/file-service-sdk"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ntropix_file_service"]

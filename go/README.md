@@ -9,11 +9,11 @@ firmadas; tu backend expone un único endpoint de subida que habla el
 ## Instalación
 
 ```sh
-go get github.com/marcanii/file-service-sdk/go
+go get github.com/ntropix/file-service-sdk/go
 ```
 
 ```go
-import fileservice "github.com/marcanii/file-service-sdk/go"
+import fileservice "github.com/ntropix/file-service-sdk/go"
 ```
 
 ## Cliente

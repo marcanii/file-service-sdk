@@ -20,7 +20,7 @@ info:
     |---|---|---|
     | Node (Next.js, NestJS, Express) | `npm i @ntropix/file-service` | `createUploadRoute(fs, { auth })` / `fs.handleUpload(body, { ownerRef })` |
     | Python (FastAPI, Django, Flask) | desde GitHub (ver su README) | `fs.handle_upload(body, owner_ref=...)` |
-    | Go (net/http, gin, echo) | `go get github.com/marcanii/file-service-sdk/go` | `client.UploadHandler(auth, opts)` |
+    | Go (net/http, gin, echo) | `go get github.com/ntropix/file-service-sdk/go` | `client.UploadHandler(auth, opts)` |
     | PHP (Laravel, Symfony) | desde GitHub, repo VCS en Composer (ver su README) | `$fs->handleUpload($body, ownerRef: ...)` |
 
     En el navegador, con cualquier backend:
@@ -30,7 +30,7 @@ info:
     const file = await upload(input.files[0], { endpoint: "/api/files", onProgress: (p) => console.log(p.percent) });
     ```
 
-    Guías y ejemplos por framework: <https://github.com/marcanii/file-service-sdk>.
+    Guías y ejemplos por framework: <https://github.com/ntropix/file-service-sdk>.
 
     ## Convenciones
 

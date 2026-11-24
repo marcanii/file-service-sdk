@@ -7,7 +7,7 @@ backend; los bytes viajan directo del navegador al storage.
 |---|---|---|---|
 | Node / TypeScript (Next.js, NestJS, Express, Hono…) | `@ntropix/file-service` | `npm install @ntropix/file-service` | [js/](./js) |
 | Python (FastAPI, Django, Flask) | `ntropix-file-service` | desde GitHub, ver [python/](./python#instalación) | [python/](./python) |
-| Go (net/http, gin, echo) | `github.com/marcanii/file-service-sdk/go` | `go get github.com/marcanii/file-service-sdk/go` | [go/](./go) |
+| Go (net/http, gin, echo) | `github.com/ntropix/file-service-sdk/go` | `go get github.com/ntropix/file-service-sdk/go` | [go/](./go) |
 | PHP (Laravel, Symfony) | `ntropix/file-service` | desde GitHub, ver [php/](./php#instalación) | [php/](./php) |
 | Navegador (con cualquier backend) | `@ntropix/file-service/browser` | npm, o CDN `https://cdn.jsdelivr.net/npm/@ntropix/file-service@1/dist/browser.js` | [js/](./js#2-navegador-upload) |
 
