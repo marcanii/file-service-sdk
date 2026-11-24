@@ -14,8 +14,8 @@ publica sin ningún token guardado en el repo (npm revocó los tokens clásicos 
 
 | Registry | Qué hacer una sola vez |
 |---|---|
-| **npm** | Cuenta en npmjs.com con 2FA. Crear la organización `ntropix` (plan gratuito: alcanza para paquetes públicos). En el paquete `@ntropix/file-service` → *Settings → Trusted publishing*: GitHub Actions, owner `marcanii`, repo `file-service-sdk`, workflow `publish.yml`, sin environment. Una configuración nueva tiene que publicar **dentro de los 2 días** o vence. Si la web no deja configurarlo para un paquete que todavía no existe, publicar la primera versión a mano (`cd js && npm login && pnpm install && pnpm build && pnpm test && npm publish --access public`) y configurarlo después. |
-| **PyPI** | Cuenta en pypi.org con 2FA. En *Your projects → Publishing → Add a pending publisher*: proyecto `ntropix-file-service`, owner `marcanii`, repo `file-service-sdk`, workflow `publish.yml`, environment `pypi`. En GitHub: *Settings → Environments → New environment* `pypi`. |
+| **npm** | Cuenta en npmjs.com con 2FA. Crear la organización `ntropix` (plan gratuito: alcanza para paquetes públicos). En el paquete `@ntropix/file-service` → *Settings → Trusted publishing*: GitHub Actions, owner `ntropix`, repo `file-service-sdk`, workflow `publish.yml`, sin environment. Una configuración nueva tiene que publicar **dentro de los 2 días** o vence. Si la web no deja configurarlo para un paquete que todavía no existe, publicar la primera versión a mano (`cd js && npm login && pnpm install && pnpm build && pnpm test && npm publish --access public`) y configurarlo después. |
+| **PyPI** | Cuenta en pypi.org con 2FA. En *Your projects → Publishing → Add a pending publisher*: proyecto `ntropix-file-service`, owner `ntropix`, repo `file-service-sdk`, workflow `publish.yml`, environment `pypi`. En GitHub: *Settings → Environments → New environment* `pypi`. |
 | **Packagist** | Entrar a packagist.org con GitHub → *Submit* con la URL de este repo. Activar la integración con GitHub que ofrece, para que cada tag se publique solo. |
 | **Go** | Nada: `go get` lee directo de GitHub; pkg.go.dev indexa solo. |
 
@@ -41,7 +41,7 @@ git tag js/v1.1.0 && git tag go/v1.1.0 && git tag v1.1.0
 git push origin js/v1.1.0 go/v1.1.0 v1.1.0
 
 # opcional: que pkg.go.dev lo indexe enseguida
-GOPROXY=https://proxy.golang.org go list -m github.com/marcanii/file-service-sdk/go@v1.1.0
+GOPROXY=https://proxy.golang.org go list -m github.com/ntropix/file-service-sdk/go@v1.1.0
 ```
 
 Versionado semántico: un cambio incompatible del protocolo o de la API sube el major de todos los SDKs.

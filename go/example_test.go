@@ -11,7 +11,7 @@ import (
 	"os"
 	"time"
 
-	fileservice "github.com/marcanii/file-service-sdk/go"
+	fileservice "github.com/ntropix/file-service-sdk/go"
 )
 
 func ExampleNew() {

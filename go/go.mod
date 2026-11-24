@@ -1,3 +1,3 @@
-module github.com/marcanii/file-service-sdk/go
+module github.com/ntropix/file-service-sdk/go
 
 go 1.22
