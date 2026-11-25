@@ -17,6 +17,7 @@ __all__ = [
     "DownloadInfo",
     "FileInfo",
     "FilePage",
+    "Usage",
     "UploadInstructions",
     "CreatedUpload",
     "PartUrl",
@@ -56,12 +57,12 @@ class FileInfo:
     id: str
     #: Slug del Proyecto dueño.
     project: str
-    status: str
+    status: FileStatus
     name: str
     #: Tipo declarado al subir; una vez `AVAILABLE`, el tipo REAL detectado por el servicio.
     mime_type: str
     size: int
-    visibility: str
+    visibility: Visibility
     created_at: str
     metadata: Dict[str, Any] = field(default_factory=dict)
     #: SHA-256 del contenido (cuando ya fue verificado).
@@ -74,6 +75,8 @@ class FileInfo:
     deleted_at: Optional[str] = None
     #: Solo viene en `get()` y si el archivo está disponible.
     download: Optional[DownloadInfo] = None
+    #: Motivo del fallo o la cuarentena. Solo viene en los Eventos `file.failed` y `file.quarantined`.
+    reason: Optional[str] = None
 
     @classmethod
     def from_api(cls, raw: Mapping[str, Any]) -> "FileInfo":
@@ -82,11 +85,11 @@ class FileInfo:
         return cls(
             id=raw["id"],
             project=raw.get("project") or "",
-            status=raw["status"],
+            status=raw["status"],  # type: ignore[arg-type]
             name=raw.get("original_name") or "",
             mime_type=raw.get("mime_type") or "",
             size=int(raw.get("size_bytes") or 0),
-            visibility=raw.get("visibility") or "private",
+            visibility=raw.get("visibility") or "private",  # type: ignore[arg-type]
             created_at=raw.get("created_at") or "",
             metadata=dict(raw.get("metadata") or {}),
             content_hash=raw.get("content_hash") or None,
@@ -94,6 +97,7 @@ class FileInfo:
             public_url=raw.get("public_url") or None,
             deleted_at=raw.get("deleted_at") or None,
             download=DownloadInfo(url=dl["url"], expires_at=dl.get("expires_at") or "") if dl else None,
+            reason=raw.get("reason") or None,
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -124,6 +128,27 @@ class FilePage:
 
     files: List[FileInfo]
     next_cursor: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class Usage:
+    """Uso del Proyecto contra su Cuota y límites de su Política (`usage()`)."""
+
+    used_bytes: int  # incluye subidas en curso
+    quota_bytes: int  # 0 = sin cuota
+    file_count: int  # archivos vivos (fuera de la papelera)
+    max_file_size: int
+    allowed_mime_types: List[str]  # vacío = cualquier tipo; admite "image/*"
+
+    @staticmethod
+    def from_api(raw: Mapping[str, Any]) -> "Usage":
+        return Usage(
+            used_bytes=int(raw["used_bytes"]),
+            quota_bytes=int(raw["quota_bytes"]),
+            file_count=int(raw["file_count"]),
+            max_file_size=int(raw["max_file_size"]),
+            allowed_mime_types=list(raw.get("allowed_mime_types") or []),
+        )
 
 
 @dataclass(frozen=True)
@@ -171,7 +196,7 @@ class CreatedUpload:
     """Resultado de `create_upload()`."""
 
     id: str
-    status: str
+    status: FileStatus
     upload: UploadInstructions
 
 
@@ -195,7 +220,7 @@ class WebhookEvent:
 
     #: Id único del evento: usalo para descartar duplicados (la entrega es at-least-once).
     id: str
-    type: str
+    type: WebhookEventType
     file: FileInfo
 
 

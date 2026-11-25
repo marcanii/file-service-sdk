@@ -102,6 +102,12 @@ file, err := fs.Upload(ctx, fileservice.UploadInput{
 }) // espera a AVAILABLE salvo NoWait: true
 ```
 
+**Checksum declarado.** Con un `io.ReaderAt` como `Body`, `Upload` calcula el SHA-256 leyendo por
+bloques y lo declara al crear la subida. Un `Body` de una sola pasada no se hashea: pasá `SHA256`
+(64 hex en minúscula) si lo conocés; `CreateUploadInput.SHA256` también lo acepta. En subida simple
+el storage rechaza un contenido distinto (`checksum_mismatch`); en multipart el file termina
+`FAILED` (`*RejectedError` si esperás). Otro formato → `validation`, sin llamar a la API.
+
 ## Descarga y gestión
 
 ```go
@@ -109,9 +115,11 @@ url, err := fs.DownloadURL(ctx, id, fileservice.GetOptions{Inline: true}) // URL
 file, err := fs.Get(ctx, id, fileservice.GetOptions{})
 files, next, err := fs.List(ctx, fileservice.ListOptions{OwnerRef: "user_8812", Limit: 50})
 err = fs.ListAll(ctx, fileservice.ListOptions{OwnerRef: "user_8812"}, func(f *fileservice.File) error { return nil })
+usage, err := fs.Usage(ctx)                       // uso y Cuota del Proyecto (key `read` alcanza)
 file, err = fs.Update(ctx, id, fileservice.UpdateInput{Visibility: fileservice.VisibilityPublic}) // file.PublicURL
 err = fs.Delete(ctx, id)        // papelera
 file, err = fs.Restore(ctx, id) // la recupera
+err = fs.Purge(ctx, id)         // Purga anticipada: definitiva, en el acto
 ```
 
 ## Webhooks
@@ -145,7 +153,7 @@ case errors.As(err, &apiErr) && apiErr.Code == fileservice.CodeNotFound:
 
 `Code` es estable: `validation`, `unauthorized`, `forbidden`, `not_found`, `invalid_state`,
 `no_bytes`, `too_large`, `type_not_allowed`, `quota_exceeded`, `storage_full`, `rate_limited`,
-`internal`, y los del SDK `network` / `timeout` (Status 0) y `storage_rejected`.
+`internal`, y los del SDK `network` / `timeout` (Status 0), `storage_rejected` y `checksum_mismatch`.
 `RejectedError` también se ve como `*Error` 422 (`quarantined` / `failed`).
 
 `RequestID` es el `X-Request-ID` de la respuesta (vacío en `network` / `timeout`) y aparece en

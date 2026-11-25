@@ -11,4 +11,6 @@ enum Visibility: string
 {
     case Private = 'private';
     case Public = 'public';
+    /** Visibilidad que este SDK no conoce (el servicio agregó una nueva). */
+    case Unknown = 'unknown';
 }

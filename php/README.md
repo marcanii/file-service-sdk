@@ -122,14 +122,23 @@ Otras operaciones:
 ```php
 $page = $fs->list(ownerRef: 'user_1', limit: 50);   // FilePage: ->files, ->nextCursor
 foreach ($fs->listAll(ownerRef: 'user_1') as $file) { /* recorre todas las páginas */ }
+$usage = $fs->usage();                              // Usage: ->usedBytes, ->quotaBytes (0 = sin cuota), ->fileCount…
 $fs->update($id, visibility: Visibility::Public);    // ->publicUrl: URL estable sin credencial
 $fs->delete($id);                                    // papelera
 $fs->restore($id);
+$fs->purge($id);                                     // Purga anticipada: definitiva, en el acto
 
 // Subida desde el servidor (PDF generado, etc.): string, stream o SplFileInfo.
 // Lee por partes: un archivo grande no se carga entero en memoria.
 $file = $fs->upload(name: 'reporte.pdf', mimeType: 'application/pdf', data: new SplFileInfo('/tmp/r.pdf'));
 ```
+
+**Checksum declarado.** Con un string, un `SplFileInfo` o un stream con seek, `upload()` calcula el
+SHA-256 leyendo por bloques y lo declara al crear la subida. Un stream sin seek no se hashea: pasá
+`sha256:` (64 hex en minúscula) si lo conocés; `createUpload(..., sha256: ...)` también lo acepta.
+En subida simple el storage rechaza un contenido distinto (`errorCode` `checksum_mismatch`); en
+multipart el file termina `FAILED` (`FileRejectedException` si esperás). Otro formato →
+`validation`, sin llamar a la API.
 
 Para archivos del usuario preferí el endpoint de subida: así los bytes no pasan por tu backend.
 
@@ -174,3 +183,12 @@ try {
 ## Licencia
 
 MIT
+
+## Comportamiento HTTP
+
+- Todos los requests a la API llevan `User-Agent: ntropix-file-service-php/<versión>`.
+- Reintentos (`retries`, default 2): red, 429 y 5xx en las operaciones idempotentes; `createUpload()` solo reintenta ante 429 (rechazado antes de procesar), nunca ante red/5xx. Se respeta `Retry-After` (segundos o fecha HTTP) con tope de 60 s.
+- `wait` en `complete()`/`upload()`: `false`, `0` o negativo = no espera (devuelve el file en `READY`); `true` = hasta 30 s; un número positivo = ese máximo en segundos.
+- Estados y visibilidades que el SDK no conoce llegan como `FileStatus::Unknown` / `Visibility::Unknown` (no lanza); `Unknown` no es final ni descargable.
+- Reintentar una operación idempotente cuyo 2xx se perdió puede devolver `404` (`delete`, `restore`, `purge`, `update`): el SDK no lo enmascara; trátalo como éxito si el objetivo era que el file ya no esté (o consulta con `get()`).
+- `verifyWebhook()` acepta varios `v1` en `FS-Signature` (rotación del secret).

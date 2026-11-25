@@ -5,7 +5,7 @@
 // autentica con el header x-user): prueba la compatibilidad del protocolo entre lenguajes.
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { FileService, createUploadRoute } from "../dist/index.js";
 import { upload, UploadError } from "../dist/browser.js";
 
@@ -57,6 +57,21 @@ try {
   assert.equal(f2.status, "AVAILABLE");
   assert.equal(f2.size, big.size);
   step("upload() multipart (34 MB) → AVAILABLE");
+
+  const hashed = new Blob([`con checksum ${randomBytes(8).toString("hex")}\n`.repeat(20)], { type: "text/plain" });
+  const f3 = await upload(hashed, { endpoint, name: "hash.txt", headers: { "x-user": "user_9" } });
+  assert.equal(f3.status, "AVAILABLE");
+  assert.equal(f3.contentHash, createHash("sha256").update(Buffer.from(await hashed.arrayBuffer())).digest("hex"));
+  // Un digest que no es el del contenido simula un archivo que cambió entre el hash y la subida.
+  const digest = crypto.subtle.digest.bind(crypto.subtle);
+  crypto.subtle.digest = (alg) => digest(alg, new TextEncoder().encode("otro contenido"));
+  try {
+    await assert.rejects(upload(hashed, { endpoint, name: "hash.txt", headers: { "x-user": "user_9" } }),
+      (e) => e instanceof UploadError && e.status === 400 && e.code === "checksum_mismatch");
+  } finally {
+    crypto.subtle.digest = digest;
+  }
+  step("upload() simple declara el sha256; contenido distinto → UploadError checksum_mismatch");
 
   await assert.rejects(upload(small, { endpoint, name: "x.txt" }), (e) => e instanceof UploadError && e.status === 401 && e.code === "unauthorized");
   step("sin sesión → UploadError 401 unauthorized");

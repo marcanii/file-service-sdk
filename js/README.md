@@ -20,7 +20,7 @@ npm install @ntropix/file-service      # pnpm add · yarn add · bun add
 ```
 
 Funciona con `import` (ESM: Next.js, Vite, Bun) y con `require` (CommonJS: NestJS por defecto),
-en Node ≥ 18, con npm, pnpm, yarn (también Plug'n'Play) y bun. Tipos de TypeScript incluidos.
+en Node ≥ 20, con npm, pnpm, yarn (también Plug'n'Play) y bun. Tipos de TypeScript incluidos.
 
 Variables de entorno del backend (la key se emite en el Panel del File Service):
 
@@ -111,8 +111,18 @@ const file = await upload(input.files[0], {
 Si tu framework exige CSRF (Django, Laravel con rutas `web`), mandá el token con `headers`:
 `upload(file, { endpoint, headers: { "X-CSRF-TOKEN": token } })`.
 
+Si el endpoint de subida está en **otro origen** y se autentica con cookies, pasá
+`credentials: "include"` (default `"same-origin"`); el endpoint debe responder CORS con credenciales:
+`upload(file, { endpoint: "https://api.miapp.com/files", credentials: "include" })`.
+El `PUT` de bytes (simple o por parte) se reintenta (`retries`, default 3, con backoff) solo ante
+errores de red y `5xx`; un `4xx` falla de inmediato.
+
+En subidas simples (menos de 32 MB) `upload()` calcula el SHA-256 del archivo con WebCrypto y lo
+declara en `create`: el storage rechaza cualquier otro contenido (ver [PROTOCOL.md](../PROTOCOL.md)).
+Requiere contexto seguro (`https://` o `localhost`); sin WebCrypto la subida sigue sin Checksum declarado.
+
 Errores: `UploadError` con `status` y `code` (`too_large`, `type_not_allowed`, `quota_exceeded`,
-`quarantined`, `unauthorized`…). Sin bundler (ej. un backend PHP o Python con HTML plano):
+`quarantined`, `unauthorized`, `checksum_mismatch`…). Sin bundler (ej. un backend PHP o Python con HTML plano):
 
 ```html
 <script type="module">
@@ -140,7 +150,7 @@ const { publicUrl } = await fs.update(fileId, { visibility: "public" });
 ### Control fino (opcional)
 
 Si necesitás manejar cada paso a mano, el cliente expone las operaciones de bajo nivel:
-`createUpload` → (navegador: `uploadFile(file, upload, { signParts })`) → `signParts` → `complete`.
+`createUpload` → (navegador: `uploadFile(file, upload, { signParts })`) → `signParts` → `complete`. El helper firma las partes por lotes (`signBatchSize`, default 10) y renueva una URL vencida sin abortar (ver PROTOCOL.md).
 Ver la referencia abajo.
 
 ## Referencia
@@ -157,10 +167,12 @@ Ver la referencia abajo.
 | `fs.getDownloadUrl(id, { inline? })` | Atajo: solo la URL firmada |
 | `fs.list({ ownerRef?, status?, trashed?, cursor?, limit? })` | Una página → `{ files, nextCursor }` |
 | `fs.listAll(opts?)` | Iterador asíncrono sobre todas las páginas |
+| `fs.usage()` | Uso y Cuota del Proyecto → `{ usedBytes, quotaBytes, fileCount, maxFileSize, allowedMimeTypes }` (sirve con key `read`) |
 | `fs.update(id, { visibility?, name? })` | Cambia visibilidad y/o nombre |
 | `fs.delete(id)` | Manda a la papelera (recuperable) |
 | `fs.restore(id)` | Recupera de la papelera |
-| `fs.upload({ ...input, data })` | Sube desde el servidor en una llamada (ej. un PDF generado) |
+| `fs.purge(id)` | Purga anticipada: borra en el acto y sin vuelta atrás, esté o no en la papelera |
+| `fs.upload({ ...input, data })` | Sube desde el servidor en una llamada (ej. un PDF generado). Calcula y declara el SHA-256 |
 | `FileService.verifyWebhook({ payload, signature, secret })` | Verifica la firma y devuelve el evento |
 
 Todas las operaciones aceptan `{ actor, signal }`. `actor` es el id del usuario final que originó
@@ -189,9 +201,23 @@ Todo error de la API es un `FileServiceError` con `status` (HTTP) y `code` estab
 | `quota_exceeded` / `storage_full` | 507 | Cuota del proyecto agotada / el servicio no tiene espacio |
 | `rate_limited` | 429 | Demasiadas solicitudes (el SDK reintenta solo) |
 | `network` / `timeout` | 0 | No se pudo conectar / no respondió a tiempo |
+| `storage_rejected` | 4xx | El storage rechazó el `PUT` de bytes de `upload()` |
+| `checksum_mismatch` | 400 | El storage rechazó el `PUT` de `upload()`: el contenido no coincide con su `sha256` |
 
 El SDK reintenta automáticamente (con backoff) errores de red, `429` y `5xx` en las operaciones que
-son seguras de repetir. `createUpload` no se reintenta.
+son seguras de repetir, y respeta `Retry-After` (segundos o fecha HTTP) con un tope de 60 s.
+`createUpload` solo reintenta `429` (la API lo rechaza antes de procesar, no duplica nada), no red ni `5xx`.
+El `PUT` de bytes al storage de `upload()` tiene timeout por intento (`timeoutMs`) y reintenta red,
+timeout y `5xx`. Todos los requests a la API envían `User-Agent: ntropix-file-service-js/<versión>`.
+
+**Checksum declarado.** `upload()` calcula el SHA-256 de `data` (un `Blob` se lee como stream) y lo
+declara al crear la subida; `createUpload({ ..., sha256 })` y `upload({ ..., sha256 })` aceptan uno
+explícito (64 hex en minúscula; otro formato → `validation` sin llamar a la API). En subida simple el
+storage rechaza un contenido distinto (`checksum_mismatch`); en multipart el archivo termina `FAILED`
+(`FileRejectedError` si esperás).
+
+`complete({ wait })`: `false`/`undefined`/`0`/negativo no espera (devuelve el archivo en `READY`);
+`true` espera hasta 30 s; un número positivo es el máximo en ms; también acepta `WaitOptions`.
 
 `err.requestId` trae el `X-Request-ID` de la respuesta (`undefined` en `network` / `timeout`):
 logueálo e incluilo al reportar un problema, así se encuentra el request en los logs del servicio.

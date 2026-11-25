@@ -7,8 +7,13 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import re
 import time
 from typing import Optional
+
+#: Formato canónico (sdk/PROTOCOL.md): exp = 1 a 12 dígitos ASCII sin ceros a la izquierda; MAC = 64 hex en minúscula.
+CANONICAL_UNIX = re.compile(r"[1-9][0-9]{0,11}", re.ASCII)
+LOWER_HEX_SHA256 = re.compile(r"[0-9a-f]{64}", re.ASCII)
 
 #: Vida del token: 24 h, igual que `ABANDONED_UPLOAD_TIMEOUT`.
 TOKEN_TTL_SECONDS = 86400
@@ -30,11 +35,11 @@ def verify_upload_token(api_key: str, token: str, file_id: str, owner_ref: str, 
     if not isinstance(token, str):
         return False
     exp_str, sep, mac = token.partition(".")
-    if not sep or not exp_str.isdigit() or len(exp_str) > 12:
+    if not sep or not CANONICAL_UNIX.fullmatch(exp_str) or not LOWER_HEX_SHA256.fullmatch(mac):
         return False
     exp = int(exp_str)
     current = time.time() if now is None else now
     if exp <= current:
         return False
     expected = _sign(api_key, file_id, owner_ref, exp)
-    return hmac.compare_digest(expected.encode("ascii"), mac.lower().encode("ascii", "replace"))
+    return hmac.compare_digest(expected.encode("ascii"), mac.encode("ascii"))

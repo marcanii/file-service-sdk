@@ -1,4 +1,4 @@
-import { type CompletedPart, type CreatedUpload, type FileInfo, type FileStatus, type PartUrl, type Visibility, type WebhookEvent } from "./types.js";
+import { type CompletedPart, type CreatedUpload, type FileInfo, type FileStatus, type PartUrl, type Usage, type Visibility, type WebhookEvent } from "./types.js";
 export type * from "./types.js";
 export interface FileServiceOptions {
     /** API key del proyecto (`fsk_live_...` / `fsk_test_...`). */
@@ -31,6 +31,12 @@ export interface CreateUploadInput {
     visibility?: Visibility;
     /** Datos propios del proyecto (JSON, hasta 16 KB). */
     metadata?: Record<string, unknown>;
+    /**
+     * Checksum declarado: SHA-256 del contenido, 64 hex en minúscula. Opcional. En subida simple el
+     * storage rechaza un contenido distinto (`checksum_mismatch`); en multipart, el file termina
+     * `FAILED`. `upload()` lo calcula solo si no se pasa. Otro formato → `validation`, sin llamar a la API.
+     */
+    sha256?: string;
 }
 export interface WaitOptions {
     /** Tiempo máximo de espera en ms (default 30 000). */
@@ -38,15 +44,23 @@ export interface WaitOptions {
     /** Intervalo inicial entre consultas en ms (default 500; crece hasta 3 000). */
     intervalMs?: number;
     signal?: AbortSignal;
+    /** Id del usuario final: queda en la auditoría de las consultas de la espera. */
+    actor?: string;
 }
 export interface CompleteOptions extends CallOptions {
     /** Requerido en subidas multipart: las partes con sus ETags. */
     parts?: CompletedPart[];
     /**
-     * Esperar a que el archivo quede verificado antes de devolver. Con `true` usa los defaults de
-     * `waitUntilAvailable`. Si el archivo termina en FAILED o QUARANTINED, lanza `FileRejectedError`.
+     * Esperar a que el archivo quede verificado antes de devolver. Si el archivo termina en FAILED o
+     * QUARANTINED, lanza `FileRejectedError`.
+     *
+     * - `false`, `undefined`, `0`, un número negativo o `{ timeoutMs <= 0 }`: sin espera; devuelve
+     *   apenas el servicio cierra la subida (archivo en `READY`, sin `download`).
+     * - `true`: espera hasta 30 s (defaults de `waitUntilAvailable`).
+     * - número positivo: tiempo máximo de espera en ms.
+     * - `WaitOptions`: espera con esas opciones.
      */
-    wait?: boolean | WaitOptions;
+    wait?: boolean | number | WaitOptions;
 }
 export interface ListOptions {
     ownerRef?: string;
@@ -98,6 +112,10 @@ export declare class FileRejectedError extends FileServiceError {
     readonly file: FileInfo;
     constructor(file: FileInfo);
 }
+/** La verificación del archivo no terminó dentro del tiempo de espera; sigue en curso en el servicio. */
+export declare class VerificationTimeoutError extends FileServiceError {
+    constructor(message: string);
+}
 /** La firma del webhook no es válida, o el evento es demasiado viejo. */
 export declare class WebhookSignatureError extends Error {
     constructor(message: string);
@@ -141,6 +159,12 @@ export declare function createUploadRoute(fs: FileService, opts: UploadRouteOpti
 export declare function verifyUploadToken(apiKey: string, id: string, ownerRef: string, token: unknown, nowSec?: number): boolean;
 /** @internal Exportado para los tests de vectores compartidos. */
 export declare function makeUploadToken(apiKey: string, id: string, ownerRef: string, exp: number): string;
+/**
+ * Interpreta `Retry-After` (segundos o fecha HTTP) como ms de espera, con tope de 60 s.
+ * `undefined` si falta, es inválido o ya venció (entonces se usa el backoff).
+ * @internal Exportado para los tests.
+ */
+export declare function parseRetryAfterMs(value: string | null | undefined): number | undefined;
 export declare class FileService {
     private readonly apiKey;
     private readonly baseUrl;
@@ -181,14 +205,30 @@ export declare class FileService {
     }>;
     /** Recorre todas las páginas de `list()`. */
     listAll(opts?: Omit<ListOptions, "cursor">): AsyncGenerator<FileInfo>;
+    /**
+     * Uso del proyecto contra su Cuota y límites de su Política. Sirve con una key de solo lectura;
+     * consultarlo antes de iniciar una subida evita un `quota_exceeded`.
+     */
+    usage(opts?: CallOptions): Promise<Usage>;
     /** Cambia la visibilidad y/o el nombre. Hacer público o privado un archivo es instantáneo. */
     update(id: string, changes: {
         visibility?: Visibility;
         name?: string;
     }, opts?: CallOptions): Promise<FileInfo>;
-    /** Manda el archivo a la papelera. Se puede recuperar con `restore()` durante el período de retención. */
+    /**
+     * Manda el archivo a la papelera. Se puede recuperar con `restore()` durante el período de retención.
+     * Sobre una subida en curso (sin completar), la cancela: ya no se puede restaurar ni completar.
+     */
     delete(id: string, opts?: CallOptions): Promise<void>;
-    /** Recupera un archivo de la papelera. */
+    /**
+     * Purga anticipada: borra el archivo en el acto y sin vuelta atrás, esté o no en la papelera (p. ej.
+     * un pedido de borrado de datos personales). No se lista, no se restaura, no se descarga y su URL
+     * pública deja de responder. Si otro archivo del Proyecto comparte el contenido, ese contenido
+     * sigue; si no, el servicio lo borra en su ciclo de limpieza. Una subida en curso → `invalid_state`
+     * (usá `delete()`); inexistente o ya purgado → `not_found`.
+     */
+    purge(id: string, opts?: CallOptions): Promise<void>;
+    /** Recupera un archivo de la papelera. Una subida cancelada no se restaura: `invalid_state`. */
     restore(id: string, opts?: CallOptions): Promise<FileInfo>;
     /**
      * Sube un archivo desde el servidor (por ejemplo, uno generado por el backend) y espera a que
@@ -196,7 +236,7 @@ export declare class FileService {
      * el navegador: así los bytes no pasan por tu backend.
      */
     upload(input: UploadInput, opts?: CallOptions & {
-        wait?: boolean | WaitOptions;
+        wait?: boolean | number | WaitOptions;
     }): Promise<FileInfo>;
     /**
      * Verifica la firma de un webhook y devuelve el evento. Pasá el body CRUDO (texto o bytes, sin
@@ -223,7 +263,11 @@ export declare class FileService {
     /** Token de subida (sdk/PROTOCOL.md): prueba sin estado de que `id` lo creó `ownerRef`. */
     private uploadToken;
     private checkUploadToken;
-    /** PUT de bytes a una URL firmada del storage. Devuelve el ETag. */
+    /**
+     * PUT de bytes a una URL firmada del storage. Devuelve el ETag. Cada intento tiene su timeout y
+     * se reintenta ante red, timeout y 5xx (repetir un PUT al mismo objeto es idempotente; el Blob
+     * se puede volver a leer).
+     */
     private put;
     private request;
 }

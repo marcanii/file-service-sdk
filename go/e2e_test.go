@@ -12,6 +12,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -151,6 +152,11 @@ func crud(t *testing.T, c *Client, id, owner string) {
 		t.Fatalf("DownloadURL: %v", err)
 	}
 
+	u, err := c.Usage(ctx)
+	if err != nil || u.FileCount < 1 || u.UsedBytes < 1 || u.MaxFileSize < 1 || u.AllowedMimeTypes == nil {
+		t.Fatalf("Usage: %+v %v", u, err)
+	}
+
 	files, _, err := c.List(ctx, ListOptions{OwnerRef: owner, Limit: 200})
 	if err != nil || !containsID(files, id) {
 		t.Fatalf("List: %d files, err %v", len(files), err)
@@ -285,5 +291,52 @@ func TestE2E_ServerUploadMultipart(t *testing.T) {
 	f2, err := c.Upload(ctx, UploadInput{Name: "e2e-small.bin", MimeType: "application/octet-stream", Body: bytes.NewReader(small)})
 	if err != nil || f2.Status != StatusAvailable || f2.ContentHash != sha256Hex(small) {
 		t.Fatalf("Upload simple: %+v %v", f2, err)
+	}
+}
+
+// Checksum declarado incorrecto: en simple lo rechaza el storage (checksum_mismatch); en multipart,
+// la verificación del servicio (FAILED → *RejectedError).
+func TestE2E_DeclaredChecksumIncorrecto(t *testing.T) {
+	c := e2eClient(t)
+	ctx := context.Background()
+	wrong := sha256Hex([]byte("otro contenido"))
+
+	_, err := c.Upload(ctx, UploadInput{Name: "e2e-mal.txt", MimeType: "text/plain",
+		Body: bytes.NewReader([]byte("hola checksum\n")), SHA256: wrong})
+	var apiErr *Error
+	if !errors.As(err, &apiErr) || apiErr.Code != CodeChecksumMismatch || apiErr.Status != 400 {
+		t.Fatalf("simple: err = %v", err)
+	}
+
+	big := randomBytes(t, 33<<20)
+	_, err = c.Upload(ctx, UploadInput{Name: "e2e-mal.bin", MimeType: "application/octet-stream",
+		Body: bytes.NewReader(big), SHA256: wrong, WaitTimeout: 2 * time.Minute})
+	var rejected *RejectedError
+	if !errors.As(err, &rejected) || rejected.File.Status != StatusFailed {
+		t.Fatalf("multipart: err = %v", err)
+	}
+}
+
+// Purga anticipada: irreversible; un file purgado no existe más (get, restore y purge → not_found).
+func TestE2E_Purge(t *testing.T) {
+	c := e2eClient(t)
+	ctx := context.Background()
+	f, err := c.Upload(ctx, UploadInput{Name: "e2e-purgar.txt", MimeType: "text/plain", Body: bytes.NewReader(randomBytes(t, 64))})
+	if err != nil {
+		t.Fatalf("Upload: %v", err)
+	}
+	if err := c.Purge(WithActor(ctx, "go_e2e"), f.ID); err != nil {
+		t.Fatalf("Purge: %v", err)
+	}
+	checks := map[string]func() error{
+		"Get":     func() error { _, err := c.Get(ctx, f.ID, GetOptions{}); return err },
+		"Restore": func() error { _, err := c.Restore(ctx, f.ID); return err },
+		"Purge":   func() error { return c.Purge(ctx, f.ID) },
+	}
+	for name, call := range checks {
+		var e *Error
+		if err := call(); !errors.As(err, &e) || e.Code != CodeNotFound {
+			t.Errorf("%s tras purgar: err = %v, quiero not_found", name, err)
+		}
 	}
 }

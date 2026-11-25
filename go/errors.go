@@ -30,6 +30,9 @@ const (
 	CodeTimeout = "timeout"
 	// CodeStorageRejected: el storage rechazó un PUT de bytes (URL vencida, tamaño distinto…).
 	CodeStorageRejected = "storage_rejected"
+	// CodeChecksumMismatch: el storage rechazó el PUT de una subida simple porque el contenido no
+	// coincide con el Checksum declarado (SHA256).
+	CodeChecksumMismatch = "checksum_mismatch"
 )
 
 // Error es un error devuelto por la API (o generado por el SDK al hablar con ella).

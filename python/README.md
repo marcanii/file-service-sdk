@@ -30,7 +30,7 @@ fs = FileService(
     api_key=os.environ["FS_API_KEY"],          # fsk_live_... / fsk_test_...
     base_url="https://files.ntropix.dev",
     timeout=30,                                # segundos por request
-    retries=2,                                 # ante red, 429 y 5xx (nunca en create_upload)
+    retries=2,                                 # ante red, 429 y 5xx (create_upload: solo 429)
 )
 ```
 
@@ -106,6 +106,13 @@ Por defecto espera a que quede `AVAILABLE` (`wait=True` = 30 s, `wait=120` = 120
 no espera). Las piezas sueltas también están: `create_upload`, `sign_parts`,
 `complete(id, parts=None, wait=...)` y `wait_until_available(id, timeout=30)`.
 
+**Checksum declarado.** Con `bytes`, una ruta o un archivo con seek, `upload` calcula el SHA-256 por
+bloques (sin cargar el archivo en memoria) y lo declara al crear la subida. En subida simple el
+storage rechaza un contenido distinto (`FileServiceError` con `code == "checksum_mismatch"`); en
+multipart el archivo termina `FAILED` (`FileRejectedError` si esperás). Un stream sin seek no se
+hashea: pasá `sha256=` (64 hex en minúscula) si ya lo conocés. `create_upload(..., sha256=...)`
+también lo acepta. Un formato inválido falla con `code == "validation"` sin llamar a la API.
+
 ## Consultar y descargar
 
 ```python
@@ -116,15 +123,19 @@ page = fs.list(owner_ref="user_42", limit=50)         # FilePage(files, next_cur
 for f in fs.iter_all(owner_ref="user_42"):            # recorre todas las páginas
     ...
 
+usage = fs.usage()                                    # Usage(used_bytes, quota_bytes, file_count, ...)
+
 fs.update(file_id, visibility="public")               # f.public_url: URL estable, sirve en <img src>
 fs.update(file_id, name="contrato-firmado.pdf")
 fs.delete(file_id)                                    # papelera
 fs.restore(file_id)
+fs.purge(file_id)                                     # Purga anticipada: definitiva, en el acto
 ```
 
 `FileInfo` es un dataclass: `id`, `project`, `status`, `name`, `mime_type` (el tipo **real** una vez
 verificado), `size`, `content_hash`, `owner_ref`, `visibility`, `public_url`, `metadata`,
-`created_at`, `deleted_at`, `download` (`url`, `expires_at`). `to_dict()` lo da en camelCase.
+`created_at`, `deleted_at`, `download` (`url`, `expires_at`), `reason` (solo en eventos
+`file.failed`/`file.quarantined`). `to_dict()` lo da en camelCase.
 
 ## Webhooks
 
@@ -161,7 +172,7 @@ es estable. `err.request_id` trae el `X-Request-ID` de la respuesta (`None` en `
 | 413 | `too_large` | Supera el máximo del Proyecto |
 | 415 | `type_not_allowed` | Tipo declarado fuera de la allowlist |
 | 422 | `quarantined` / `failed` | `FileRejectedError`: el servicio rechazó el contenido (`err.file`) |
-| 429 | `rate_limited` | Límite de requests (se reintenta respetando `Retry-After`) |
+| 429 | `rate_limited` | Límite de requests (se reintenta respetando `Retry-After`, tope 60 s) |
 | 507 | `quota_exceeded` / `storage_full` | Cuota del Proyecto / tope global |
 | 0 | `network` / `timeout` | No se pudo hablar con el servicio, o la espera venció |
 

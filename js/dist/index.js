@@ -4,8 +4,8 @@
  * Se usa SOLO en el backend del proyecto: la API key nunca debe llegar al navegador. El navegador
  * recibe únicamente las instrucciones de subida (URLs firmadas) — ver `@ntropix/file-service/browser`.
  */
-import { createHmac, timingSafeEqual } from "node:crypto";
-import { toFileInfo, toUploadInstructions, } from "./types.js";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
+import { hasChecksumHeader, toFileInfo, toUploadInstructions, } from "./types.js";
 /** Error devuelto por la API. `code` es estable y sirve para decidir qué hacer. */
 export class FileServiceError extends Error {
     status;
@@ -41,6 +41,13 @@ export class FileRejectedError extends FileServiceError {
             : "el archivo no pasó la verificación (corrupto o incompleto)", 422, file.status === "QUARANTINED" ? "quarantined" : "failed");
         this.file = file;
         this.name = "FileRejectedError";
+    }
+}
+/** La verificación del archivo no terminó dentro del tiempo de espera; sigue en curso en el servicio. */
+export class VerificationTimeoutError extends FileServiceError {
+    constructor(message) {
+        super(message, 0, "timeout");
+        this.name = "VerificationTimeoutError";
     }
 }
 /** La firma del webhook no es válida, o el evento es demasiado viejo. */
@@ -98,6 +105,26 @@ function parseBody(body) {
 function isPlainObject(v) {
     return typeof v === "object" && v !== null && !Array.isArray(v);
 }
+// Formato canónico (sdk/PROTOCOL.md): Unix = 1 a 12 dígitos ASCII sin ceros a la izquierda; MAC = 64 hex en minúscula.
+const CANONICAL_UNIX_RE = /^[1-9][0-9]{0,11}$/;
+const LOWER_HEX_SHA256_RE = /^[0-9a-f]{64}$/;
+/** SHA-256 hex del contenido; un Blob se lee como stream, sin cargarlo entero. */
+async function sha256Of(data) {
+    const h = createHash("sha256");
+    if (data instanceof Blob) {
+        for await (const chunk of data.stream())
+            h.update(chunk);
+    }
+    else {
+        h.update(data instanceof Uint8Array ? data : new Uint8Array(data));
+    }
+    return h.digest("hex");
+}
+/** Checksum declarado: mismo formato canónico que el Content Hash (ver PROTOCOL.md). */
+function isDeclaredSha256(v) {
+    return typeof v === "string" && LOWER_HEX_SHA256_RE.test(v);
+}
+const UPLOAD_TOKEN_RE = /^([1-9][0-9]{0,11})\.([0-9a-f]{64})$/;
 function uploadTokenSig(apiKey, id, ownerRef, exp) {
     return createHmac("sha256", apiKey).update(`fs-upload-token.v1:${id}:${ownerRef}:${exp}`).digest("hex");
 }
@@ -105,18 +132,45 @@ function uploadTokenSig(apiKey, id, ownerRef, exp) {
 export function verifyUploadToken(apiKey, id, ownerRef, token, nowSec = Date.now() / 1000) {
     if (typeof token !== "string")
         return false;
-    const dot = token.indexOf(".");
-    const exp = Number(token.slice(0, dot));
-    if (dot < 1 || !Number.isInteger(exp) || exp <= nowSec)
+    const m = UPLOAD_TOKEN_RE.exec(token);
+    if (!m)
         return false;
-    const given = Buffer.from(token.slice(dot + 1), "hex");
+    const exp = Number(m[1]);
+    if (exp <= nowSec)
+        return false;
+    const given = Buffer.from(m[2], "hex");
     const expected = Buffer.from(uploadTokenSig(apiKey, id, ownerRef, exp), "hex");
-    return given.length === expected.length && timingSafeEqual(given, expected);
+    return timingSafeEqual(given, expected);
 }
 /** @internal Exportado para los tests de vectores compartidos. */
 export function makeUploadToken(apiKey, id, ownerRef, exp) {
     return `${exp}.${uploadTokenSig(apiKey, id, ownerRef, exp)}`;
 }
+/** User-Agent de todos los requests a la API (misma forma en los 4 SDKs). Mantener = package.json. */
+const USER_AGENT = "ntropix-file-service-js/1.1.0";
+/** Tope de espera por `Retry-After`, igual en los 4 SDKs. */
+const MAX_RETRY_AFTER_MS = 60_000;
+/**
+ * Interpreta `Retry-After` (segundos o fecha HTTP) como ms de espera, con tope de 60 s.
+ * `undefined` si falta, es inválido o ya venció (entonces se usa el backoff).
+ * @internal Exportado para los tests.
+ */
+export function parseRetryAfterMs(value) {
+    const v = value?.trim();
+    if (!v)
+        return undefined;
+    let ms;
+    if (/^\d+$/.test(v))
+        ms = Number(v) * 1000;
+    else {
+        const at = Date.parse(v);
+        if (Number.isNaN(at))
+            return undefined;
+        ms = at - Date.now();
+    }
+    return ms > 0 ? Math.min(ms, MAX_RETRY_AFTER_MS) : undefined;
+}
+const backoffMs = (attempt) => 250 * 2 ** (attempt - 1);
 const sleep = (ms, signal) => new Promise((resolve, reject) => {
     if (signal?.aborted)
         return reject(signal.reason);
@@ -148,7 +202,11 @@ export class FileService {
      * para subir los bytes directo al storage. Después hay que llamar a `complete()`.
      */
     async createUpload(input, opts = {}) {
+        if (input.sha256 !== undefined && !isDeclaredSha256(input.sha256)) {
+            throw new FileServiceError("sha256 debe ser 64 hex en minúscula", 0, "validation");
+        }
         const raw = await this.request("POST", "/files", {
+            retryRateLimit: true,
             body: {
                 original_name: input.name,
                 mime_type: input.mimeType,
@@ -156,6 +214,7 @@ export class FileService {
                 owner_ref: input.ownerRef,
                 visibility: input.visibility,
                 metadata: input.metadata,
+                sha256: input.sha256,
             },
             ...opts,
         });
@@ -175,9 +234,13 @@ export class FileService {
             ? { parts: opts.parts.map((p) => ({ part_number: p.partNumber, etag: p.etag.replace(/^"|"$/g, "") })) }
             : undefined;
         const file = toFileInfo(await this.request("POST", `/files/${id}/complete`, { body, idempotent: true, ...opts }));
-        if (!opts.wait)
+        const wait = opts.wait;
+        if (!wait)
             return file;
-        return this.waitUntilAvailable(id, { signal: opts.signal, ...(opts.wait === true ? {} : opts.wait) });
+        const waitOpts = typeof wait === "number" ? { timeoutMs: wait } : wait === true ? {} : wait;
+        if (waitOpts.timeoutMs !== undefined && !(waitOpts.timeoutMs > 0))
+            return file;
+        return this.waitUntilAvailable(id, { ...waitOpts, signal: opts.signal, actor: opts.actor });
     }
     /**
      * Metadatos del archivo y, si está disponible, una URL firmada de descarga de vida corta.
@@ -201,13 +264,13 @@ export class FileService {
         const deadline = Date.now() + (opts.timeoutMs ?? 30_000);
         let interval = opts.intervalMs ?? 500;
         for (;;) {
-            const file = await this.get(id, { signal: opts.signal });
+            const file = await this.get(id, { signal: opts.signal, actor: opts.actor });
             if (file.status === "AVAILABLE")
                 return file;
             if (file.status === "FAILED" || file.status === "QUARANTINED")
                 throw new FileRejectedError(file);
             if (Date.now() + interval > deadline) {
-                throw new FileServiceError(`el archivo sigue en ${file.status}: la verificación no terminó a tiempo (sigue en curso; consultá más tarde o usá el webhook)`, 0, "timeout");
+                throw new VerificationTimeoutError(`el archivo sigue en ${file.status}: la verificación no terminó a tiempo (sigue en curso; consultá más tarde o usá el webhook)`);
             }
             await sleep(interval, opts.signal);
             interval = Math.min(interval * 1.5, 3_000);
@@ -239,6 +302,20 @@ export class FileService {
             cursor = page.nextCursor;
         } while (cursor);
     }
+    /**
+     * Uso del proyecto contra su Cuota y límites de su Política. Sirve con una key de solo lectura;
+     * consultarlo antes de iniciar una subida evita un `quota_exceeded`.
+     */
+    async usage(opts = {}) {
+        const raw = await this.request("GET", "/usage", { idempotent: true, ...opts });
+        return {
+            usedBytes: raw.used_bytes,
+            quotaBytes: raw.quota_bytes,
+            fileCount: raw.file_count,
+            maxFileSize: raw.max_file_size,
+            allowedMimeTypes: raw.allowed_mime_types ?? [],
+        };
+    }
     /** Cambia la visibilidad y/o el nombre. Hacer público o privado un archivo es instantáneo. */
     async update(id, changes, opts = {}) {
         return toFileInfo(await this.request("PATCH", `/files/${id}`, {
@@ -247,11 +324,24 @@ export class FileService {
             ...opts,
         }));
     }
-    /** Manda el archivo a la papelera. Se puede recuperar con `restore()` durante el período de retención. */
+    /**
+     * Manda el archivo a la papelera. Se puede recuperar con `restore()` durante el período de retención.
+     * Sobre una subida en curso (sin completar), la cancela: ya no se puede restaurar ni completar.
+     */
     async delete(id, opts = {}) {
         await this.request("DELETE", `/files/${id}`, { idempotent: true, ...opts });
     }
-    /** Recupera un archivo de la papelera. */
+    /**
+     * Purga anticipada: borra el archivo en el acto y sin vuelta atrás, esté o no en la papelera (p. ej.
+     * un pedido de borrado de datos personales). No se lista, no se restaura, no se descarga y su URL
+     * pública deja de responder. Si otro archivo del Proyecto comparte el contenido, ese contenido
+     * sigue; si no, el servicio lo borra en su ciclo de limpieza. Una subida en curso → `invalid_state`
+     * (usá `delete()`); inexistente o ya purgado → `not_found`.
+     */
+    async purge(id, opts = {}) {
+        await this.request("POST", `/files/${id}/purge`, { idempotent: true, ...opts });
+    }
+    /** Recupera un archivo de la papelera. Una subida cancelada no se restaura: `invalid_state`. */
     async restore(id, opts = {}) {
         return toFileInfo(await this.request("POST", `/files/${id}/restore`, { idempotent: true, ...opts }));
     }
@@ -263,7 +353,9 @@ export class FileService {
     async upload(input, opts = {}) {
         const blob = input.data instanceof Blob ? input.data : new Blob([input.data]);
         const { data: _omit, ...meta } = input;
-        const created = await this.createUpload({ ...meta, size: blob.size }, opts);
+        // Todas las entradas se pueden releer: sin sha256 explícito, se calcula (createUpload lo valida).
+        const sha256 = meta.sha256 ?? (await sha256Of(input.data));
+        const created = await this.createUpload({ ...meta, size: blob.size, sha256 }, opts);
         const up = created.upload;
         let parts;
         if (up.mode === "simple") {
@@ -291,15 +383,31 @@ export class FileService {
         const { payload, signature, secret } = args;
         if (!signature)
             throw new WebhookSignatureError("falta el header FS-Signature");
-        const fields = new Map(signature.split(",").map((kv) => kv.split("=", 2)));
-        const t = Number(fields.get("t"));
-        const v1 = fields.get("v1");
-        if (!Number.isFinite(t) || !v1)
+        let tRaw;
+        const candidates = [];
+        for (const kv of signature.split(",")) {
+            const field = kv.trim();
+            const eq = field.indexOf("=");
+            if (eq < 0)
+                continue;
+            const k = field.slice(0, eq);
+            const v = field.slice(eq + 1);
+            if (k === "t") {
+                if (tRaw !== undefined)
+                    throw new WebhookSignatureError("FS-Signature con formato inválido");
+                tRaw = v;
+            }
+            else if (k === "v1" && LOWER_HEX_SHA256_RE.test(v)) {
+                candidates.push(Buffer.from(v, "hex"));
+            }
+        }
+        if (tRaw === undefined || !CANONICAL_UNIX_RE.test(tRaw) || candidates.length === 0) {
             throw new WebhookSignatureError("FS-Signature con formato inválido");
+        }
+        const t = Number(tRaw);
         const body = typeof payload === "string" ? Buffer.from(payload, "utf8") : Buffer.from(payload);
-        const expected = createHmac("sha256", secret).update(`${t}.`).update(body).digest();
-        const given = Buffer.from(v1, "hex");
-        if (given.length !== expected.length || !timingSafeEqual(given, expected)) {
+        const expected = createHmac("sha256", secret).update(`${tRaw}.`).update(body).digest();
+        if (!candidates.some((given) => timingSafeEqual(given, expected))) {
             throw new WebhookSignatureError("la firma del webhook no coincide");
         }
         if (Math.abs(Date.now() / 1000 - t) > (args.toleranceSec ?? 300)) {
@@ -331,6 +439,9 @@ export class FileService {
                     if (typeof b.name !== "string" || typeof b.mimeType !== "string" || typeof b.size !== "number") {
                         return uploadError(400, "validation", "create requiere name, mimeType y size");
                     }
+                    if (b.sha256 != null && !isDeclaredSha256(b.sha256)) {
+                        return uploadError(400, "validation", "sha256 debe ser 64 hex en minúscula");
+                    }
                     const clientMeta = isPlainObject(b.metadata) ? b.metadata : {};
                     const created = await this.createUpload({
                         name: b.name,
@@ -339,6 +450,7 @@ export class FileService {
                         ownerRef: opts.ownerRef,
                         visibility: opts.visibility,
                         metadata: { ...clientMeta, ...(opts.metadata ?? {}) },
+                        sha256: b.sha256 ?? undefined,
                     }, { actor });
                     const token = this.uploadToken(created.id, opts.ownerRef);
                     return { status: 200, body: { id: created.id, token, upload: created.upload } };
@@ -362,13 +474,16 @@ export class FileService {
                     const parts = Array.isArray(b.parts)
                         ? b.parts.map((p) => ({ partNumber: Number(p?.partNumber), etag: String(p?.etag ?? "") }))
                         : undefined;
+                    // `complete` sin espera: un timeout o fallo de red aquí es un 502 (lo resuelve el catch
+                    // de abajo). Solo el timeout de la verificación devuelve el file como está.
+                    await this.complete(b.id, { parts, actor });
                     let file;
                     try {
-                        file = await this.complete(b.id, { parts, actor, wait: { timeoutMs: opts.waitTimeoutMs ?? 30_000 } });
+                        file = await this.waitUntilAvailable(b.id, { timeoutMs: opts.waitTimeoutMs ?? 30_000, actor });
                     }
                     catch (err) {
                         // La verificación sigue en curso: se devuelve el file como está (READY).
-                        if (err instanceof FileServiceError && err.code === "timeout" && !(err instanceof FileRejectedError)) {
+                        if (err instanceof VerificationTimeoutError) {
                             file = await this.get(b.id, { actor });
                         }
                         else
@@ -384,7 +499,8 @@ export class FileService {
             if (err instanceof FileServiceError) {
                 // 401/403 de la API = la key del BACKEND fue rechazada: no es culpa del usuario (→ 502).
                 const status = err.status === 0 || err.status === 401 || err.status === 403 ? 502 : err.status;
-                return uploadError(status, err.code, err.message);
+                const res = uploadError(status, err.code, err.message);
+                return err instanceof FileRejectedError ? { ...res, file: err.file } : res;
             }
             return uploadError(500, "internal", "error interno del endpoint de subida");
         }
@@ -397,28 +513,58 @@ export class FileService {
         return typeof b.id === "string" && verifyUploadToken(this.apiKey, b.id, ownerRef, b.token);
     }
     // ─── Internos ──────────────────────────────────────────────────────────────
-    /** PUT de bytes a una URL firmada del storage. Devuelve el ETag. */
+    /**
+     * PUT de bytes a una URL firmada del storage. Devuelve el ETag. Cada intento tiene su timeout y
+     * se reintenta ante red, timeout y 5xx (repetir un PUT al mismo objeto es idempotente; el Blob
+     * se puede volver a leer).
+     */
     async put(url, body, headers, signal) {
-        let res;
-        try {
-            res = await this.fetchImpl(url, { method: "PUT", body, headers, signal });
+        const attempts = this.retries + 1;
+        let lastError;
+        for (let attempt = 1; attempt <= attempts; attempt++) {
+            const timeout = AbortSignal.timeout(this.timeoutMs);
+            const attemptSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
+            let res;
+            try {
+                res = await this.fetchImpl(url, { method: "PUT", body, headers, signal: attemptSignal });
+            }
+            catch (err) {
+                if (signal?.aborted)
+                    throw err;
+                lastError = timeout.aborted
+                    ? new FileServiceError(`el storage no respondió en ${this.timeoutMs} ms`, 0, "timeout")
+                    : new FileServiceError(`no se pudo subir al storage: ${err.message}`, 0, "network");
+            }
+            if (res) {
+                if (res.ok)
+                    return (res.headers.get("etag") ?? "").replace(/^"|"$/g, "");
+                lastError =
+                    res.status === 400 && hasChecksumHeader(headers)
+                        ? // Con el Checksum declarado firmado en el PUT, un 400 es contenido distinto del declarado.
+                            new FileServiceError("el contenido no coincide con su SHA-256 declarado", 400, "checksum_mismatch")
+                        : new FileServiceError(`el storage rechazó la subida (HTTP ${res.status})`, res.status, "storage_rejected");
+                if (res.status < 500)
+                    throw lastError;
+            }
+            if (attempt < attempts)
+                await sleep(backoffMs(attempt), signal);
         }
-        catch (err) {
-            throw new FileServiceError(`no se pudo subir al storage: ${err.message}`, 0, "network");
-        }
-        if (!res.ok)
-            throw new FileServiceError(`el storage rechazó la subida (HTTP ${res.status})`, res.status, "storage_rejected");
-        return (res.headers.get("etag") ?? "").replace(/^"|"$/g, "");
+        throw lastError;
     }
     async request(method, path, opts = {}) {
-        const headers = { Authorization: `Bearer ${this.apiKey}`, Accept: "application/json" };
+        const headers = {
+            Authorization: `Bearer ${this.apiKey}`,
+            Accept: "application/json",
+            "User-Agent": USER_AGENT,
+        };
         if (opts.actor)
             headers["FS-Actor"] = opts.actor;
         const body = opts.body === undefined ? undefined : JSON.stringify(opts.body);
         if (body !== undefined)
             headers["Content-Type"] = "application/json";
         // Solo se reintenta lo que es seguro repetir: crear un archivo dos veces dejaría uno huérfano.
-        const attempts = opts.idempotent ? this.retries + 1 : 1;
+        // Excepción: un 429 se rechaza antes de procesar, así que repetirlo nunca duplica (retryRateLimit).
+        const attempts = opts.idempotent || opts.retryRateLimit ? this.retries + 1 : 1;
         let lastError;
         for (let attempt = 1; attempt <= attempts; attempt++) {
             const timeout = AbortSignal.timeout(this.timeoutMs);
@@ -433,8 +579,10 @@ export class FileService {
                 lastError = timeout.aborted
                     ? new FileServiceError(`el File Service no respondió en ${this.timeoutMs} ms`, 0, "timeout")
                     : new FileServiceError(`no se pudo conectar con el File Service: ${err.message}`, 0, "network");
+                if (!opts.idempotent)
+                    throw lastError;
                 if (attempt < attempts)
-                    await sleep(250 * 2 ** (attempt - 1), opts.signal);
+                    await sleep(backoffMs(attempt), opts.signal);
                 continue;
             }
             if (res.status === 204)
@@ -450,11 +598,10 @@ export class FileService {
             if (res.ok)
                 return json;
             lastError = new FileServiceError(json?.error?.message ?? `respuesta inesperada del File Service (HTTP ${res.status})`, res.status, json?.error?.code ?? "internal", res.headers.get("x-request-id") ?? undefined);
-            const retryable = res.status === 429 || res.status >= 500;
+            const retryable = res.status === 429 || (opts.idempotent === true && res.status >= 500);
             if (!retryable || attempt === attempts)
                 throw lastError;
-            const retryAfter = Number(res.headers.get("retry-after"));
-            await sleep(retryAfter > 0 ? retryAfter * 1000 : 250 * 2 ** (attempt - 1), opts.signal);
+            await sleep(parseRetryAfterMs(res.headers.get("retry-after")) ?? backoffMs(attempt), opts.signal);
         }
         throw lastError;
     }

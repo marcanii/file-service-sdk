@@ -27,6 +27,8 @@ export interface FileInfo {
         url: string;
         expiresAt: string;
     };
+    /** Motivo del fallo o la cuarentena. Solo viene en los Eventos `file.failed` y `file.quarantined`. */
+    reason?: string;
 }
 /** Instrucciones para que el navegador suba los bytes directo al storage. */
 export interface UploadInstructions {
@@ -68,3 +70,18 @@ export interface WebhookEvent {
 /** snake_case de la API → camelCase del SDK. */
 export declare function toFileInfo(raw: any): FileInfo;
 export declare function toUploadInstructions(raw: any): UploadInstructions;
+/** Uso del proyecto contra su Cuota y límites de su Política. */
+export interface Usage {
+    /** Bytes ocupados por el proyecto (incluye subidas en curso). */
+    usedBytes: number;
+    /** Cuota de almacenamiento en bytes; `0` = sin cuota. */
+    quotaBytes: number;
+    /** Archivos vivos (fuera de la papelera). */
+    fileCount: number;
+    /** Tamaño máximo por archivo, en bytes. */
+    maxFileSize: number;
+    /** Tipos admitidos (admite `image/*`); vacío = cualquiera. */
+    allowedMimeTypes: string[];
+}
+/** Si las instrucciones del PUT traen el Checksum declarado firmado (`x-amz-checksum-sha256`). */
+export declare function hasChecksumHeader(headers: Record<string, string> | undefined): boolean;

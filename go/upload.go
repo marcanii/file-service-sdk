@@ -3,6 +3,8 @@ package fileservice
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -32,6 +34,10 @@ type UploadInput struct {
 	Visibility Visibility
 	// Metadata son datos propios del Proyecto (JSON, hasta 16 KB).
 	Metadata map[string]any
+	// SHA256 es el Checksum declarado (64 hex en minúscula). Si está vacío y Body implementa
+	// io.ReaderAt, el SDK lo calcula leyendo Body por bloques (sin cargarlo en memoria). Un Body de
+	// una sola pasada no se hashea: pasalo acá si lo conocés.
+	SHA256 string
 	// NoWait devuelve apenas se completa la subida (archivo en READY), sin esperar la verificación.
 	NoWait bool
 	// WaitTimeout es el máximo de espera de la verificación (default 30 s).
@@ -52,15 +58,21 @@ func (c *Client) Upload(ctx context.Context, in UploadInput) (*File, error) {
 	if err != nil {
 		return nil, err
 	}
+	ra, seekable := in.Body.(io.ReaderAt)
+	sum := in.SHA256
+	if sum == "" && seekable {
+		if sum, err = sha256Of(ra, size); err != nil {
+			return nil, err
+		}
+	}
 	created, err := c.CreateUpload(ctx, CreateUploadInput{
 		Name: in.Name, MimeType: in.MimeType, Size: size,
-		OwnerRef: in.OwnerRef, Visibility: in.Visibility, Metadata: in.Metadata,
+		OwnerRef: in.OwnerRef, Visibility: in.Visibility, Metadata: in.Metadata, SHA256: sum,
 	})
 	if err != nil {
 		return nil, err
 	}
 	up := created.Upload
-	ra, seekable := in.Body.(io.ReaderAt)
 
 	var parts []Part
 	switch up.Mode {
@@ -146,6 +158,11 @@ func (c *Client) put(ctx context.Context, url string, newBody func() io.Reader, 
 		if err == nil {
 			return etag, nil
 		}
+		// Subida simple de escritura única (If-None-Match: *): un 412 en un REINTENTO significa que el
+		// intento anterior escribió y se perdió su respuesta. El objeto ya es el nuestro.
+		if status == http.StatusPreconditionFailed && attempt > 1 {
+			return "", nil
+		}
 		if ctx.Err() != nil {
 			return "", fmt.Errorf("fileservice: %w", ctx.Err())
 		}
@@ -181,11 +198,34 @@ func (c *Client) putOnce(ctx context.Context, url string, body io.Reader, size i
 	}
 	defer res.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 64<<10))
+	if res.StatusCode == http.StatusBadRequest && hasChecksumHeader(headers) {
+		// Con el Checksum declarado firmado en el PUT, un 400 es contenido distinto del declarado.
+		return "", res.StatusCode, &Error{Status: res.StatusCode, Code: CodeChecksumMismatch,
+			Message: "el contenido no coincide con su SHA-256 declarado"}
+	}
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
 		return "", res.StatusCode, &Error{Status: res.StatusCode, Code: CodeStorageRejected,
 			Message: fmt.Sprintf("el storage rechazó la subida (HTTP %d)", res.StatusCode)}
 	}
 	return strings.Trim(res.Header.Get("ETag"), `"`), res.StatusCode, nil
+}
+
+// sha256Of calcula el SHA-256 hex de los primeros size bytes de ra, por bloques.
+func sha256Of(ra io.ReaderAt, size int64) (string, error) {
+	h := sha256.New()
+	if _, err := io.Copy(h, io.NewSectionReader(ra, 0, size)); err != nil {
+		return "", fmt.Errorf("fileservice: no se pudo leer el Body para calcular el SHA-256: %w", err)
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func hasChecksumHeader(headers map[string]string) bool {
+	for k := range headers {
+		if strings.EqualFold(k, "x-amz-checksum-sha256") {
+			return true
+		}
+	}
+	return false
 }
 
 // uploadSize resuelve el tamaño de la subida: el declarado o, si es 0, el del Body.

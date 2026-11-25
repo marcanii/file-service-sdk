@@ -72,6 +72,16 @@ T::test('vector válido → evento', function () use ($w): void {
     T::eq(FileStatus::Available, $ev->file->status);
 });
 
+T::test('vector file.failed → expone reason', function () use ($vectors): void {
+    $f = $vectors['webhookFailed'];
+    $ev = FileService::verifyWebhook($f['payload'], $f['signature'], $f['secret'], now: $f['timestamp']);
+    T::eq($f['expected']['type'], $ev->type);
+    T::eq($f['expected']['fileId'], $ev->file->id);
+    T::eq(FileStatus::Failed, $ev->file->status);
+    T::eq($f['expected']['reason'], $ev->file->reason);
+    T::eq(null, $ev->file->publicUrl);
+});
+
 T::test('payload alterado → WebhookSignatureException', function () use ($w): void {
     T::throws(WebhookSignatureException::class, fn () => FileService::verifyWebhook(
         str_replace('1234', '1235', $w['payload']),
@@ -98,6 +108,25 @@ T::test('sin firma o con formato inválido → WebhookSignatureException', funct
     T::throws(WebhookSignatureException::class, fn () => FileService::verifyWebhook($w['payload'], 'v1=abc', $w['secret']));
 });
 
+T::test('vectores negativos: firma de webhook', function () use ($vectors, $w): void {
+    $n = $vectors['webhookNegative'];
+    $messages = ['missing' => 'falta', 'malformed' => 'formato inválido', 'mismatch' => 'no coincide', 'expired' => 'viejo'];
+    T::true($n['rejected'] !== [] && $n['accepted'] !== [], 'sin vectores negativos');
+    foreach ($n['rejected'] as $c) {
+        try {
+            FileService::verifyWebhook($w['payload'], $c['signature'], $w['secret'], now: $c['now']);
+        } catch (WebhookSignatureException $e) {
+            T::true(str_contains($e->getMessage(), $messages[$c['reason']]), $c['name'] . ': ' . $e->getMessage());
+            continue;
+        }
+        T::true(false, $c['name'] . ': aceptada');
+    }
+    foreach ($n['accepted'] as $c) {
+        $ev = FileService::verifyWebhook($w['payload'], $c['signature'], $w['secret'], now: $c['now']);
+        T::eq($w['expected']['id'], $ev->id);
+    }
+});
+
 // ─── Token de subida ─────────────────────────────────────────────────────────
 
 echo "token de subida\n";
@@ -118,6 +147,13 @@ T::test('verify: válido antes de exp; vencido, otro owner, otro id o alterado �
         T::true(!UploadToken::verify($tv['apiKey'], $c['token'], $c['id'] . 'x', $c['ownerRef'], $c['exp'] - 1), 'otro id');
         T::true(!UploadToken::verify('otra_key', $c['token'], $c['id'], $c['ownerRef'], $c['exp'] - 1), 'otra key');
         T::true(!UploadToken::verify($tv['apiKey'], ($c['exp'] + 1) . substr($c['token'], strlen((string) $c['exp'])), $c['id'], $c['ownerRef'], 0), 'exp alterado');
+    }
+});
+
+T::test('vectores negativos: token de subida', function () use ($tv): void {
+    T::true($tv['negative'] !== [], 'sin vectores negativos');
+    foreach ($tv['negative'] as $c) {
+        T::true(!UploadToken::verify($tv['apiKey'], $c['token'], $c['id'], $c['ownerRef'], $c['now']), $c['name']);
     }
 });
 
@@ -173,6 +209,27 @@ T::test('create ok: token válido para ese owner, upload en camelCase, metadata 
     T::eq('user_1', $req['body']['owner_ref']);
     T::eq('public', $req['body']['visibility']);
     T::eq(['origen' => 'backend', 'album' => 'x'], $req['body']['metadata']);
+});
+
+T::test('create pasa el sha256 declarado a POST /files; ausente o null no se manda', function () use ($fs, $state, $vectors): void {
+    $sha = $vectors['declaredChecksum']['sha256'];
+    $base = ['action' => 'create', 'name' => 'a.txt', 'mimeType' => 'text/plain', 'size' => 18];
+    T::eq(200, $fs->handleUpload($base + ['sha256' => $sha], 'user_1')->status);
+    T::eq(200, $fs->handleUpload($base, 'user_1')->status);
+    T::eq(200, $fs->handleUpload($base + ['sha256' => null], 'user_1')->status);
+    $log = apiLog($state);
+    T::eq($sha, $log[0]['body']['sha256']);
+    T::true(!array_key_exists('sha256', $log[1]['body']) && !array_key_exists('sha256', $log[2]['body']), 'sin sha256 no se manda');
+});
+
+T::test('create con sha256 inválido → 400 validation sin llamar a la API', function () use ($fs, $state, $vectors): void {
+    foreach ($vectors['declaredChecksum']['invalid'] as $case) {
+        $body = json_encode(['action' => 'create', 'name' => 'a', 'mimeType' => 'x/y', 'size' => 1, 'sha256' => $case['value']]);
+        $r = $fs->handleUpload($body, 'user_1');
+        T::eq(400, $r->status, $case['name']);
+        T::eq('validation', $r->body['error']['code'], $case['name']);
+    }
+    T::eq([], apiLog($state));
 });
 
 T::test('create multipart → partes firmadas por el endpoint (parts)', function () use ($fs, $state): void {
@@ -280,6 +337,45 @@ T::test('429 con Retry-After se reintenta', function () use ($fs, $state): void 
     T::eq(2, count(apiLog($state)));
 });
 
+T::test('User-Agent identifica al SDK en cada request', function () use ($fs, $state): void {
+    apiLog($state);
+    $fs->get('f1');
+    T::eq('ntropix-file-service-php/1.1.0', apiLog($state)[0]['userAgent']);
+});
+
+T::test('createUpload reintenta ante 429 respetando Retry-After', function () use ($fs, $state): void {
+    apiLog($state);
+    $t0 = microtime(true);
+    T::eq('f-simple', $fs->createUpload('limitado.txt', 'text/plain', 1)->id);
+    T::true(microtime(true) - $t0 >= 0.9, 'respeta Retry-After: 1');
+    T::eq(2, count(apiLog($state)));
+});
+
+T::test('createUpload NO reintenta ante 5xx (podría duplicar)', function () use ($fs, $state): void {
+    apiLog($state);
+    T::throws(FileServiceException::class, fn () => $fs->createUpload('caido.txt', 'text/plain', 1));
+    T::eq(1, count(apiLog($state)));
+});
+
+T::test('Retry-After se topa en 60 s', function (): void {
+    $m = new ReflectionMethod(FileService::class, 'parseRetryAfter');
+    T::eq(60.0, $m->invoke(null, '3600'));
+});
+
+T::test('estado y visibilidad desconocidos no lanzan', function () use ($fs): void {
+    $f = $fs->get('nuevo');
+    T::eq(FileStatus::Unknown, $f->status);
+    T::eq(Visibility::Unknown, $f->visibility);
+    T::eq(false, $f->status->isFinal());
+});
+
+T::test('wait=0 o negativo en complete no espera', function () use ($fs, $state): void {
+    apiLog($state);
+    T::eq('READY', $fs->complete('slow', wait: 0)->status->value);
+    T::eq('READY', $fs->complete('slow', wait: -1.0)->status->value);
+    T::eq(2, count(apiLog($state)), 'solo los dos complete, sin GET');
+});
+
 T::test('errores tipados y FileRejectedException en wait', function () use ($fs): void {
     T::throws(FileServiceException::class, fn () => $fs->get('missing'), function (FileServiceException $e): void {
         T::eq(404, $e->status);
@@ -315,6 +411,28 @@ T::test('get(inline), list/listAll, update, delete, restore, FS-Actor', function
     T::eq('POST /files/x/restore', $log[6]['method'] . ' ' . $log[6]['path']);
 });
 
+T::test('purge(): POST /files/{id}/purge con el Actor; una subida en curso → invalid_state', function () use ($fs, $state): void {
+    apiLog($state);
+    $fs->purge('x', actor: 'u9');
+    $log = apiLog($state);
+    T::eq('POST /files/x/purge', $log[0]['method'] . ' ' . $log[0]['path']);
+    T::eq('u9', $log[0]['actor']);
+    try {
+        $fs->purge('en-curso');
+        throw new RuntimeException('debería fallar');
+    } catch (FileServiceException $e) {
+        T::eq([409, 'invalid_state'], [$e->status, $e->errorCode]);
+    }
+});
+
+T::test('usage() consulta GET /usage', function () use ($fs, $state): void {
+    apiLog($state);
+    $u = $fs->usage();
+    T::eq([400, 1000, 3, 2048, ['image/*']], [$u->usedBytes, $u->quotaBytes, $u->fileCount, $u->maxFileSize, $u->allowedMimeTypes]);
+    $log = apiLog($state);
+    T::eq('GET /usage', $log[0]['method'] . ' ' . $log[0]['path']);
+});
+
 T::test('upload() server-side: simple desde string y multipart desde stream', function () use ($fs, $state): void {
     apiLog($state);
     T::eq(FileStatus::Available, $fs->upload('a.txt', 'text/plain', 'hola')->status);
@@ -340,4 +458,92 @@ T::test('upload() server-side: simple desde string y multipart desde stream', fu
     T::eq(13, apiLog($state)[1]['length']);
 });
 
+T::test('subida simple de escritura única: 412 en un reintento = subido; 412 de entrada = error', function () use ($fs): void {
+    $fs->upload('perdida.txt', 'text/plain', 'hola', wait: false); // 503 (respuesta perdida) → reintento → 412
+    try {
+        $fs->upload('usada.txt', 'text/plain', 'hola', wait: false);
+        throw new RuntimeException('una URL ya usada debería fallar');
+    } catch (FileServiceException $e) {
+        T::eq(412, $e->status);
+    }
+});
+
+T::test('upload() declara el sha256 de string, stream con seek y archivo; no de un stream sin seek', function () use ($fs, $state, $vectors): void {
+    $content = $vectors['declaredChecksum']['content'];
+    $sha = $vectors['declaredChecksum']['sha256'];
+    apiLog($state);
+
+    $fs->upload('a.txt', 'text/plain', $content, wait: false);
+    T::eq($sha, apiLog($state)[0]['body']['sha256'], 'string');
+
+    $tmp = tmpfile();
+    fwrite($tmp, 'prefijo' . $content);
+    fseek($tmp, strlen('prefijo'));
+    $fs->upload('a.txt', 'text/plain', $tmp, wait: false);
+    $log = apiLog($state);
+    T::eq($sha, $log[0]['body']['sha256'], 'stream con seek, desde su posición');
+    T::eq($content, $log[1]['rawBody'], 'el PUT lleva los mismos bytes que se hashearon');
+
+    $path = tempnam(sys_get_temp_dir(), 'fs');
+    file_put_contents($path, $content);
+    $fs->upload('a.txt', 'text/plain', new SplFileInfo($path), wait: false);
+    unlink($path);
+    T::eq($sha, apiLog($state)[0]['body']['sha256'], 'SplFileInfo');
+
+    $pipe = popen('printf "%s" ' . escapeshellarg($content), 'r');
+    $fs->upload('a.txt', 'text/plain', $pipe, size: strlen($content), wait: false);
+    pclose($pipe);
+    T::true(!array_key_exists('sha256', apiLog($state)[0]['body']), 'un stream sin seek no se hashea');
+
+    $pipe = popen('printf "%s" ' . escapeshellarg($content), 'r');
+    $fs->upload('a.txt', 'text/plain', $pipe, size: strlen($content), wait: false, sha256: $sha);
+    pclose($pipe);
+    T::eq($sha, apiLog($state)[0]['body']['sha256'], 'sha256 explícito en un stream sin seek');
+});
+
+T::test('sha256 explícito no se recalcula: si no coincide → checksum_mismatch en subida simple', function () use ($fs, $state): void {
+    apiLog($state);
+    try {
+        $fs->upload('a.txt', 'text/plain', 'hola', wait: false, sha256: str_repeat('0', 64));
+        throw new RuntimeException('debería fallar');
+    } catch (FileServiceException $e) {
+        T::eq([400, 'checksum_mismatch'], [$e->status, $e->errorCode]);
+    }
+    T::eq(str_repeat('0', 64), apiLog($state)[0]['body']['sha256']);
+});
+
+T::test('sha256 inválido en upload() y createUpload() → validation sin llamar a la API', function () use ($fs, $state, $vectors): void {
+    apiLog($state);
+    foreach ($vectors['declaredChecksum']['invalid'] as $case) {
+        if (!is_string($case['value'])) {
+            continue; // los no-string los rechaza el tipo ?string
+        }
+        foreach ([
+            static fn () => $fs->createUpload('a', 'x/y', 1, sha256: $case['value']),
+            static fn () => $fs->upload('a', 'x/y', 'a', sha256: $case['value']),
+        ] as $call) {
+            try {
+                $call();
+                throw new RuntimeException("{$case['name']}: debería fallar");
+            } catch (FileServiceException $e) {
+                T::eq('validation', $e->errorCode, $case['name']);
+            }
+        }
+    }
+    T::eq([], apiLog($state));
+});
+
+T::test('metadata: los objetos vacíos anidados sobreviven ida y vuelta (no pasan a [])', function () use ($fs, $state): void {
+    apiLog($state);
+    $r = $fs->handleUpload(
+        '{"action":"create","name":"foto.jpg","mimeType":"image/jpeg","size":10,"metadata":{"tags":{},"a":{"b":{}},"l":[]}}',
+        'user_1',
+    );
+    T::eq(200, $r->status, json_encode($r->body));
+    $raw = apiLog($state)[0]['rawBody'];
+    T::true(str_contains($raw, '"tags":{}') && str_contains($raw, '"a":{"b":{}}') && str_contains($raw, '"l":[]'), $raw);
+
+    $file = $fs->get('meta');
+    T::true(str_contains(json_encode($file->toArray()), '"metadata":{"tags":{},"n":1}'), json_encode($file->toArray()));
+});
 T::finish();
