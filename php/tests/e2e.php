@@ -8,6 +8,7 @@ declare(strict_types=1);
 
 require __DIR__ . '/bootstrap.php';
 
+use Ntropix\FileService\FileRejectedException;
 use Ntropix\FileService\FileService;
 use Ntropix\FileService\FileServiceException;
 use Ntropix\FileService\FileStatus;
@@ -114,12 +115,40 @@ T::test('(c) upload() server-side multipart de ~40 MB desde un archivo → AVAIL
     $ids['big'] = $file->id;
 });
 
+T::test('(c2) sha256 incorrecto: simple → checksum_mismatch; multipart → FAILED', function () use ($fs): void {
+    $wrong = hash('sha256', 'otro contenido');
+    try {
+        $fs->upload('mal.txt', 'text/plain', "hola checksum\n", sha256: $wrong);
+        throw new RuntimeException('simple con sha256 incorrecto debería fallar');
+    } catch (FileServiceException $e) {
+        T::eq([400, 'checksum_mismatch'], [$e->status, $e->errorCode]);
+    }
+
+    $path = tempnam(sys_get_temp_dir(), 'fs-e2e');
+    $out = fopen($path, 'wb');
+    for ($i = 0; $i < 33; $i++) {
+        fwrite($out, random_bytes(1 << 20));
+    }
+    fclose($out);
+    try {
+        $fs->upload('mal.bin', 'application/octet-stream', new SplFileInfo($path), wait: 120.0, sha256: $wrong);
+        throw new RuntimeException('multipart con sha256 incorrecto debería terminar FAILED');
+    } catch (FileRejectedException $e) {
+        T::eq(['failed', FileStatus::Failed], [$e->errorCode, $e->fileInfo->status]);
+    } finally {
+        unlink($path);
+    }
+});
+
 T::test('(d) get + descarga, list/listAll, update public/private, delete, restore', function () use ($fs, $owner, &$ids): void {
     $id = $ids['proto'];
     $url = $fs->getDownloadUrl($id, actor: $owner);
     [$st, $got] = http('GET', $url);
     T::eq(200, $st);
     T::eq($ids['protoBytes'], $got, 'misma descarga');
+
+    $usage = $fs->usage();
+    T::true($usage->usedBytes > 0 && $usage->fileCount >= 1 && $usage->maxFileSize > 0, 'usage() del Proyecto');
 
     $page = $fs->list(ownerRef: $owner, limit: 1);
     T::eq(1, count($page->files));
@@ -148,6 +177,14 @@ T::test('(d) get + descarga, list/listAll, update public/private, delete, restor
     T::true(in_array($id, array_map(static fn ($f) => $f->id, $fs->list(ownerRef: $owner, trashed: true)->files), true));
     T::throws(FileServiceException::class, fn () => $fs->getDownloadUrl($id), fn (FileServiceException $e) => T::eq('invalid_state', $e->errorCode));
     T::eq(null, $fs->restore($id)->deletedAt);
+});
+
+T::test('(e) purge() borra en el acto, sin restore; purgar de nuevo → not_found', function () use ($fs, $owner): void {
+    $doomed = $fs->upload('purgar.txt', 'text/plain', 'purgar ' . bin2hex(random_bytes(8)) . "\n", ownerRef: $owner);
+    $fs->purge($doomed->id, actor: $owner);
+    foreach ([fn () => $fs->get($doomed->id), fn () => $fs->restore($doomed->id), fn () => $fs->purge($doomed->id)] as $call) {
+        T::throws(FileServiceException::class, $call, fn (FileServiceException $e) => T::eq('not_found', $e->errorCode));
+    }
 });
 
 T::test('errores tipados (not_found, unauthorized)', function () use ($fs, $baseUrl): void {

@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -188,19 +191,34 @@ type fakeService struct {
 	signCalls int
 	completed []map[string]any
 	storeFail atomic.Int32
+	// storeThenFail: el PUT escribe pero la respuesta "se pierde" (500). Con If-None-Match: * el storage
+	// responde 412 si el objeto ya existe, como el real.
+	storeThenFail atomic.Int32
+	// declared son los sha256 recibidos en cada POST /files ("" si no vino).
+	declared []string
 }
 
 func (f *fakeService) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == "POST" && r.URL.Path == "/files":
 		var req struct {
-			Size int64 `json:"size_bytes"`
+			Size   int64  `json:"size_bytes"`
+			SHA256 string `json:"sha256"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
+		f.mu.Lock()
+		f.declared = append(f.declared, req.SHA256)
+		f.mu.Unlock()
 		base := "http://" + r.Host
 		if req.Size < f.threshold {
+			headers := map[string]string{"Content-Type": "application/octet-stream", "If-None-Match": "*"}
+			if req.SHA256 != "" {
+				// Como la API: el Checksum declarado va firmado en el PUT, en base64.
+				raw, _ := hex.DecodeString(req.SHA256)
+				headers["x-amz-checksum-sha256"] = base64.StdEncoding.EncodeToString(raw)
+			}
 			writeJSON(w, 201, map[string]any{"id": "f1", "status": "PENDING", "upload": map[string]any{
-				"mode": "simple", "url": base + "/storage/0", "headers": map[string]string{"Content-Type": "application/octet-stream"},
+				"mode": "simple", "url": base + "/storage/0", "headers": headers,
 				"expires_at": "2026-11-10T12:15:00Z"}})
 			return
 		}
@@ -233,10 +251,30 @@ func (f *fakeService) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		n, _ := strconv.Atoi(strings.TrimPrefix(r.URL.Path, "/storage/"))
+		f.mu.Lock()
+		_, exists := f.received[n]
+		f.mu.Unlock()
+		if exists && r.Header.Get("If-None-Match") == "*" {
+			w.WriteHeader(http.StatusPreconditionFailed)
+			return
+		}
 		data, _ := io.ReadAll(r.Body)
+		if want := r.Header.Get("x-amz-checksum-sha256"); want != "" {
+			// Como el storage: un contenido distinto del checksum firmado se rechaza sin escribir.
+			sum := sha256.Sum256(data)
+			if base64.StdEncoding.EncodeToString(sum[:]) != want {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+		}
 		f.mu.Lock()
 		f.received[n] = data
 		f.mu.Unlock()
+		if f.storeThenFail.Load() > 0 {
+			f.storeThenFail.Add(-1)
+			w.WriteHeader(500)
+			return
+		}
 		w.Header().Set("ETag", fmt.Sprintf(`"etag-%d"`, n))
 	case r.Method == "POST" && r.URL.Path == "/files/f1/complete":
 		var req map[string]any
@@ -307,5 +345,126 @@ func TestUpload_SimpleSizeFromBody(t *testing.T) {
 	}
 	if _, ok := fake.completed[0]["parts"]; ok {
 		t.Error("complete simple no debe mandar parts")
+	}
+}
+
+// Escritura única (If-None-Match: *): si un PUT escribió pero su respuesta se perdió, el reintento
+// recibe 412 y eso es éxito, no error: el objeto ya es el de este upload.
+func TestUpload_SimpleRetryAfterLostResponseIs412(t *testing.T) {
+	fake := &fakeService{t: t, partSize: 5, threshold: 100, received: map[int][]byte{}}
+	fake.storeThenFail.Store(1)
+	c := newTestClient(t, fake)
+	_, err := c.Upload(context.Background(), UploadInput{Name: "a.txt", MimeType: "text/plain", Body: strings.NewReader("hola"), NoWait: true})
+	if err != nil {
+		t.Fatalf("el 412 del reintento debe contar como subido: %v", err)
+	}
+	if string(fake.received[0]) != "hola" || len(fake.completed) != 1 {
+		t.Errorf("recibido %q, completes %d", fake.received[0], len(fake.completed))
+	}
+}
+
+// Un 412 en el PRIMER intento es una URL ya usada: es error.
+func TestUpload_Simple412OnFirstAttemptIsError(t *testing.T) {
+	fake := &fakeService{t: t, partSize: 5, threshold: 100, received: map[int][]byte{0: []byte("otro")}}
+	c := newTestClient(t, fake)
+	_, err := c.Upload(context.Background(), UploadInput{Name: "a.txt", MimeType: "text/plain", Body: strings.NewReader("hola"), NoWait: true})
+	var e *Error
+	if !errors.As(err, &e) || e.Status != http.StatusPreconditionFailed {
+		t.Fatalf("quería error 412, llegó %v", err)
+	}
+}
+
+func TestRequests_SendUserAgent(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("User-Agent"); got != UserAgent {
+			t.Errorf("User-Agent = %q", got)
+		}
+		writeJSON(w, 200, wireFileJSON("f1", "READY"))
+	}))
+	if _, err := c.Get(context.Background(), "f1", GetOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(UserAgent, "ntropix-file-service-go/") {
+		t.Errorf("UserAgent = %q", UserAgent)
+	}
+}
+
+func TestCreateUpload_Retries429ButNot5xx(t *testing.T) {
+	var calls atomic.Int32
+	var status atomic.Int32
+	status.Store(429)
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := calls.Add(1)
+		if int(status.Load()) == 429 && n < 2 {
+			apiError(w, 429, "rate_limited", "despacio")
+			return
+		}
+		if status.Load() == 503 {
+			apiError(w, 503, "unavailable", "caído")
+			return
+		}
+		writeJSON(w, 201, map[string]any{"id": "f1", "status": "PENDING", "upload": map[string]any{"mode": "simple", "url": "http://s/put"}})
+	}))
+	in := CreateUploadInput{Name: "a.txt", MimeType: "text/plain", Size: 1}
+	if _, err := c.CreateUpload(context.Background(), in); err != nil {
+		t.Fatalf("429 debería reintentarse: %v", err)
+	}
+	if calls.Load() != 2 {
+		t.Errorf("llamadas tras 429 = %d", calls.Load())
+	}
+	calls.Store(0)
+	status.Store(503)
+	if _, err := c.CreateUpload(context.Background(), in); err == nil {
+		t.Fatal("503 debería fallar")
+	}
+	if calls.Load() != 1 {
+		t.Errorf("un 5xx no debe reintentarse al crear: llamadas = %d", calls.Load())
+	}
+}
+
+func TestRetryAfter_CappedAt60s(t *testing.T) {
+	h := http.Header{"Retry-After": {"3600"}}
+	if got := retryAfter(h); got != maxRetryAfter || maxRetryAfter != 60*time.Second {
+		t.Errorf("retryAfter = %s", got)
+	}
+}
+
+func TestUsage(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" || r.URL.Path != "/usage" {
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+		}
+		writeJSON(w, 200, map[string]any{"used_bytes": 400, "quota_bytes": 1000, "file_count": 3,
+			"max_file_size": 2048, "allowed_mime_types": []string{"image/*"}})
+	}))
+	u, err := c.Usage(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.UsedBytes != 400 || u.QuotaBytes != 1000 || u.FileCount != 3 || u.MaxFileSize != 2048 ||
+		len(u.AllowedMimeTypes) != 1 || u.AllowedMimeTypes[0] != "image/*" {
+		t.Errorf("usage = %+v", u)
+	}
+}
+
+func TestPurge(t *testing.T) {
+	var method, path, actor string
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method, path, actor = r.Method, r.URL.Path, r.Header.Get("FS-Actor")
+		if r.URL.Path == "/files/en-curso/purge" {
+			apiError(w, 409, CodeInvalidState, "subida en curso")
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	if err := c.Purge(WithActor(context.Background(), "user_1"), "f1"); err != nil {
+		t.Fatal(err)
+	}
+	if method != "POST" || path != "/files/f1/purge" || actor != "user_1" {
+		t.Errorf("request = %s %s actor=%q", method, path, actor)
+	}
+	var e *Error
+	if err := c.Purge(context.Background(), "en-curso"); !errors.As(err, &e) || e.Status != 409 || e.Code != CodeInvalidState {
+		t.Errorf("err = %v", err)
 	}
 }

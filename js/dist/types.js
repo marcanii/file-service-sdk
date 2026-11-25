@@ -15,6 +15,7 @@ export function toFileInfo(raw) {
         createdAt: raw.created_at,
         deletedAt: raw.deleted_at ?? undefined,
         download: raw.download ? { url: raw.download.url, expiresAt: raw.download.expires_at } : undefined,
+        reason: raw.reason || undefined,
     };
 }
 export function toUploadInstructions(raw) {
@@ -26,4 +27,8 @@ export function toUploadInstructions(raw) {
         partCount: raw.part_count || undefined,
         expiresAt: raw.expires_at,
     };
+}
+/** Si las instrucciones del PUT traen el Checksum declarado firmado (`x-amz-checksum-sha256`). */
+export function hasChecksumHeader(headers) {
+    return Object.keys(headers ?? {}).some((k) => k.toLowerCase() === "x-amz-checksum-sha256");
 }

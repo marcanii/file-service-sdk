@@ -24,6 +24,12 @@ const (
 	maxPartsPerBatch = 100
 	// maxResponseBody acota lo que se lee de una respuesta JSON de la API.
 	maxResponseBody = 16 << 20
+	// maxRetryAfter acota cuánto se obedece un Retry-After (igual en los 4 SDKs).
+	maxRetryAfter = 60 * time.Second
+	// Version es la versión del SDK.
+	Version = "1.2.0"
+	// UserAgent es el User-Agent que el SDK manda a la API (mismo formato en los 4 SDKs).
+	UserAgent = "ntropix-file-service-go/" + Version
 )
 
 // Config configura un [Client]. APIKey y BaseURL son obligatorios.
@@ -37,8 +43,9 @@ type Config struct {
 	// Timeout por request a la API (default 30 s). No aplica a los PUT de bytes al storage,
 	// que solo respetan el context.
 	Timeout time.Duration
-	// Retries ante errores de red, 429 y 5xx en operaciones seguras de repetir (todas salvo
-	// CreateUpload). 0 usa el default (2); un valor negativo los desactiva.
+	// Retries ante errores de red, 429 y 5xx en operaciones seguras de repetir; CreateUpload solo
+	// reintenta 429 (la API rechazó el request sin crear nada). 0 usa el default (2); un valor
+	// negativo los desactiva.
 	Retries int
 }
 
@@ -108,11 +115,9 @@ func (c *Client) do(ctx context.Context, method, path string, body any, idempote
 			return fmt.Errorf("fileservice: no se pudo serializar el body: %w", err)
 		}
 	}
-	// Solo se reintenta lo que es seguro repetir: crear un archivo dos veces dejaría uno huérfano.
-	attempts := 1
-	if idempotent {
-		attempts = c.retries + 1
-	}
+	// Red y 5xx solo se reintentan si es seguro repetir (crear un archivo dos veces dejaría uno
+	// huérfano); un 429 significa que la API no procesó el request, así que siempre se reintenta.
+	attempts := c.retries + 1
 	var lastErr error
 	for attempt := 1; attempt <= attempts; attempt++ {
 		status, header, data, err := c.roundTrip(ctx, method, path, payload)
@@ -121,6 +126,9 @@ func (c *Client) do(ctx context.Context, method, path string, body any, idempote
 				return fmt.Errorf("fileservice: %w", ctx.Err())
 			}
 			lastErr = err
+			if !idempotent {
+				return err
+			}
 			if attempt < attempts {
 				if err := sleep(ctx, c.backoff(attempt)); err != nil {
 					return err
@@ -139,7 +147,7 @@ func (c *Client) do(ctx context.Context, method, path string, body any, idempote
 		}
 		apiErr := parseAPIError(status, data)
 		apiErr.RequestID = header.Get("X-Request-ID")
-		retryable := status == http.StatusTooManyRequests || status >= 500
+		retryable := status == http.StatusTooManyRequests || (idempotent && status >= 500)
 		if !retryable || attempt == attempts {
 			return apiErr
 		}
@@ -170,6 +178,7 @@ func (c *Client) roundTrip(ctx context.Context, method, path string, payload []b
 	}
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", UserAgent)
 	if payload != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -228,13 +237,13 @@ func retryAfter(h http.Header) time.Duration {
 	if v == "" {
 		return 0
 	}
+	var d time.Duration
 	if secs, err := strconv.Atoi(v); err == nil {
-		return time.Duration(secs) * time.Second
+		d = time.Duration(secs) * time.Second
+	} else if t, err := http.ParseTime(v); err == nil {
+		d = time.Until(t)
 	}
-	if t, err := http.ParseTime(v); err == nil {
-		return time.Until(t)
-	}
-	return 0
+	return min(d, maxRetryAfter)
 }
 
 // sleep espera d o hasta que se cancele el context.

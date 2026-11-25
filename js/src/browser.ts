@@ -7,7 +7,7 @@
  *   const { parts } = await uploadFile(file, upload, { onProgress: (p) => setProgress(p.percent) });
  *   await fetch(`/api/files/${id}/complete`, { method: "POST", body: JSON.stringify({ parts }) });
  */
-import type { CompletedPart, PartUrl, UploadInstructions } from "./types.js";
+import { hasChecksumHeader, type CompletedPart, type PartUrl, type UploadInstructions } from "./types.js";
 
 export type { CompletedPart, PartUrl, UploadInstructions } from "./types.js";
 
@@ -26,9 +26,14 @@ export interface UploadFileOptions {
    * (el backend las obtiene con `fs.signParts(id, partNumbers)`).
    */
   signParts?: (partNumbers: number[]) => Promise<PartUrl[]>;
+  /**
+   * Partes cuya firma se pide en un solo `signParts` (default 10, máximo 100): cada pedido incluye la
+   * parte que hace falta y las que siguen en la cola, así el backend no ve una ida por parte.
+   */
+  signBatchSize?: number;
   /** Partes subidas en paralelo en multipart (default 3). */
   concurrency?: number;
-  /** Reintentos por parte ante fallas de red (default 3). */
+  /** Reintentos ante errores de red y 5xx, por parte en multipart y en la subida simple (default 3). */
   retries?: number;
 }
 
@@ -36,7 +41,10 @@ export class UploadError extends Error {
   constructor(
     message: string,
     readonly status: number,
-    /** `code` estable del error (too_large, type_not_allowed, quarantined…), si el endpoint lo informó. */
+    /**
+     * `code` estable del error (too_large, type_not_allowed, quarantined…), si el endpoint lo informó.
+     * `checksum_mismatch`: el storage rechazó los bytes porque no coinciden con el Checksum declarado.
+     */
     readonly code?: string,
   ) {
     super(message);
@@ -59,7 +67,17 @@ export async function uploadFile(
 
   if (upload.mode === "simple") {
     if (!upload.url) throw new UploadError("instrucciones de subida inválidas: falta la URL", 0);
-    await put(upload.url, file, upload.headers, opts.signal, report);
+    const url = upload.url;
+    try {
+      await withRetries(opts, () => put(url, file, upload.headers, opts.signal, report));
+    } catch (err) {
+      // Con el Checksum declarado firmado en el PUT, el 400 del storage significa que los bytes no son
+      // los que se declararon (cambió el archivo entre el hash y la subida, o se corrompió).
+      if (err instanceof UploadError && err.status === 400 && hasChecksumHeader(upload.headers)) {
+        throw new UploadError("el contenido no coincide con su SHA-256 declarado", 400, "checksum_mismatch");
+      }
+      throw err;
+    }
     report(total);
     return { parts: [] };
   }
@@ -78,30 +96,72 @@ export async function uploadFile(
   };
 
   const pending = Array.from({ length: partCount }, (_, i) => i + 1);
+  const batchSize = Math.min(Math.max(1, Math.floor(opts.signBatchSize ?? 10)), 100);
+  const signed = new Map<number, Promise<string>>();
+  // Firma `n` y, de paso, las siguientes de la cola que aún no tienen URL (look-ahead).
+  const urlFor = (n: number): Promise<string> => {
+    const hit = signed.get(n);
+    if (hit) return hit;
+    const batch = [n, ...pending.filter((p) => !signed.has(p)).slice(0, batchSize - 1)];
+    const request = opts.signParts!(batch).then((urls) => new Map(urls.map((u) => [u.partNumber, u.url])));
+    for (const p of batch) {
+      const url = request.then((m) => {
+        const u = m.get(p);
+        if (!u) throw new UploadError(`el backend no devolvió la URL de la parte ${p}`, 0);
+        return u;
+      });
+      url.catch(() => signed.get(p) === url && signed.delete(p));
+      signed.set(p, url);
+    }
+    return signed.get(n)!;
+  };
   const worker = async () => {
     for (;;) {
       const n = pending.shift();
       if (n === undefined) return;
       const chunk = file.slice((n - 1) * partSize, n * partSize);
-      const retries = opts.retries ?? 3;
-      for (let attempt = 0; ; attempt++) {
+      const putPart = async () =>
+        put(await urlFor(n), chunk, undefined, opts.signal, (loaded) => progress(n, loaded));
+      let refreshes = 0;
+      await withRetries(opts, async () => {
+        let etag: string;
         try {
-          // La URL se firma justo antes de usarla: no caduca aunque la subida sea lenta.
-          const [signed] = await opts.signParts!([n]);
-          const etag = await put(signed.url, chunk, undefined, opts.signal, (loaded) => progress(n, loaded));
-          parts.push({ partNumber: n, etag });
-          progress(n, chunk.size);
-          break;
+          etag = await putPart();
         } catch (err) {
-          if (opts.signal?.aborted || attempt >= retries) throw err;
-          await new Promise((r) => setTimeout(r, 500 * 2 ** attempt));
+          // 403 del storage: la URL firmada venció. Se pide una nueva (máx. 2 veces) sin abortar la subida.
+          // Ante red o 5xx se conserva la URL: no se gasta rate limit en re-firmar.
+          if (!(err instanceof UploadError && err.status === 403) || refreshes >= 2 || opts.signal?.aborted) throw err;
+          refreshes++;
+          signed.delete(n);
+          etag = await putPart();
         }
-      }
+        signed.delete(n);
+        parts.push({ partNumber: n, etag });
+        progress(n, chunk.size);
+      });
     }
   };
   await Promise.all(Array.from({ length: Math.min(opts.concurrency ?? 3, partCount) }, worker));
   parts.sort((a, b) => a.partNumber - b.partNumber);
   return { parts };
+}
+
+/** Solo se reintentan los errores de red (status 0) y los 5xx: un 4xx se repetiría igual. */
+function isRetryable(err: unknown): boolean {
+  return err instanceof UploadError && (err.status === 0 || err.status >= 500);
+}
+
+async function withRetries(opts: UploadFileOptions, fn: () => Promise<unknown>): Promise<void> {
+  const retries = opts.retries ?? 3;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await fn();
+      return;
+    } catch (err) {
+      if (opts.signal?.aborted || attempt >= retries || !isRetryable(err)) throw err;
+      await new Promise((r) => setTimeout(r, 500 * 2 ** attempt));
+    }
+  }
 }
 
 export interface UploadOptions extends Omit<UploadFileOptions, "signParts"> {
@@ -113,6 +173,11 @@ export interface UploadOptions extends Omit<UploadFileOptions, "signParts"> {
   metadata?: Record<string, unknown>;
   /** Nombre a usar en vez de `file.name`. */
   name?: string;
+  /**
+   * Modo de credenciales del `fetch` al endpoint (default `"same-origin"`). Con un endpoint en otro
+   * origen que usa cookies hay que pasar `"include"` (y el endpoint debe responder CORS con credenciales).
+   */
+  credentials?: RequestCredentials;
 }
 
 /**
@@ -131,7 +196,7 @@ export async function upload(file: File | Blob, opts: UploadOptions): Promise<Up
         headers: { "Content-Type": "application/json", Accept: "application/json", ...(opts.headers ?? {}) },
         body: JSON.stringify(body),
         signal: opts.signal,
-        credentials: "same-origin",
+        credentials: opts.credentials ?? "same-origin",
       });
     } catch {
       throw new UploadError("no se pudo conectar con el endpoint de subida", 0);
@@ -145,7 +210,8 @@ export async function upload(file: File | Blob, opts: UploadOptions): Promise<Up
 
   const name = opts.name ?? (file as File).name ?? "archivo";
   const mimeType = file.type || "application/octet-stream";
-  const created = await call({ action: "create", name, mimeType, size: file.size, metadata: opts.metadata });
+  const sha256 = await declaredChecksum(file);
+  const created = await call({ action: "create", name, mimeType, size: file.size, metadata: opts.metadata, sha256 });
   const { id, token } = created;
 
   const { parts } = await uploadFile(file, created.upload, {
@@ -153,6 +219,24 @@ export async function upload(file: File | Blob, opts: UploadOptions): Promise<Up
     signParts: async (partNumbers) => (await call({ action: "parts", id, token, partNumbers })).urls,
   });
   return call({ action: "complete", id, token, parts: parts.length ? parts : undefined });
+}
+
+/**
+ * Umbral de multipart por defecto del servicio. El helper no lo conoce de antemano: por debajo asume
+ * subida simple y calcula el Checksum declarado, que ahí garantiza el storage.
+ */
+const SIMPLE_UPLOAD_MAX = 32 * 1024 * 1024;
+
+/**
+ * Checksum declarado (ver PROTOCOL.md): SHA-256 con WebCrypto, solo para subidas simples (WebCrypto no
+ * hashea por partes y en multipart el storage no lo verificaría). Sin WebCrypto (contexto no
+ * seguro, http://) no se declara nada y la subida sigue igual.
+ */
+async function declaredChecksum(file: Blob): Promise<string | undefined> {
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle || file.size >= SIMPLE_UPLOAD_MAX) return undefined;
+  const digest = new Uint8Array(await subtle.digest("SHA-256", await file.arrayBuffer()));
+  return Array.from(digest, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 /** El archivo tal como lo devuelve el endpoint de subida (`FileInfo` del SDK). */
@@ -193,7 +277,10 @@ function put(
     };
     xhr.onerror = () => reject(new UploadError("error de red durante la subida", 0));
     xhr.onabort = () => reject(new UploadError("subida cancelada", 0));
-    signal?.addEventListener("abort", () => xhr.abort(), { once: true });
+    const onAbort = () => xhr.abort();
+    signal?.addEventListener("abort", onAbort, { once: true });
+    // Sin esto cada PUT dejaría un listener vivo en el signal (fuga en subidas con miles de partes).
+    xhr.onloadend = () => signal?.removeEventListener("abort", onAbort);
     xhr.send(body);
   });
 }

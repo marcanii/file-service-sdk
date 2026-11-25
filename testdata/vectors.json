@@ -14,6 +14,20 @@
       "size": 1234
     }
   },
+  "webhookFailed": {
+    "_comment": "file.failed con reason; el file es público pero no AVAILABLE, así que no trae public_url.",
+    "secret": "whsec_vector_secret",
+    "timestamp": 1731250000,
+    "payload": "{\"id\":\"0193a1c7-2f00-7000-8000-000000000002\",\"type\":\"file.failed\",\"data\":{\"file\":{\"id\":\"0193a1c7-2f00-7000-8000-0000000000cc\",\"project\":\"demo\",\"status\":\"FAILED\",\"original_name\":\"roto.pdf\",\"mime_type\":\"application/pdf\",\"size_bytes\":99,\"content_hash\":null,\"owner_ref\":\"user_1\",\"visibility\":\"public\",\"metadata\":{},\"created_at\":\"2026-11-10T12:00:00Z\",\"reason\":\"archivo corrupto\"}}}",
+    "signature": "t=1731250000,v1=d4df43a90cacfb4853831e62032a8a6cfa0f13788a72d781077ee69243d83864",
+    "expected": {
+      "id": "0193a1c7-2f00-7000-8000-000000000002",
+      "type": "file.failed",
+      "fileId": "0193a1c7-2f00-7000-8000-0000000000cc",
+      "status": "FAILED",
+      "reason": "archivo corrupto"
+    }
+  },
   "uploadToken": {
     "apiKey": "fsk_test_vector_key",
     "cases": [
@@ -28,6 +42,370 @@
         "ownerRef": "otro@ejemplo.com",
         "exp": 1999999999,
         "token": "1999999999.f0c66552d2ba466abe9aa8f4c0639c79c68222c01e0e604b02d897c4c2fe1402"
+      }
+    ],
+    "negative": [
+      {
+        "name": "vencido (exp == now)",
+        "id": "0193a1c7-2f00-7000-8000-0000000000aa",
+        "ownerRef": "user_1",
+        "now": 1731336400,
+        "token": "1731336400.2f233202f96da62e3f1645ab77dd612df651ae19dad56e246bcb2f120b4e7d3a"
+      },
+      {
+        "name": "vencido (exp < now)",
+        "id": "0193a1c7-2f00-7000-8000-0000000000aa",
+        "ownerRef": "user_1",
+        "now": 1731336401,
+        "token": "1731336400.2f233202f96da62e3f1645ab77dd612df651ae19dad56e246bcb2f120b4e7d3a"
+      },
+      {
+        "name": "de otro Owner Ref",
+        "id": "0193a1c7-2f00-7000-8000-0000000000aa",
+        "ownerRef": "otro@ejemplo.com",
+        "now": 1731336340,
+        "token": "1731336400.2f233202f96da62e3f1645ab77dd612df651ae19dad56e246bcb2f120b4e7d3a"
+      },
+      {
+        "name": "de otro id",
+        "id": "0193a1c7-2f00-7000-8000-0000000000ff",
+        "ownerRef": "user_1",
+        "now": 1731336340,
+        "token": "1731336400.2f233202f96da62e3f1645ab77dd612df651ae19dad56e246bcb2f120b4e7d3a"
+      },
+      {
+        "name": "MAC alterado",
+        "id": "0193a1c7-2f00-7000-8000-0000000000aa",
+        "ownerRef": "user_1",
+        "now": 1731336340,
+        "token": "1731336400.2f233202f96da62e3f1645ab77dd612df651ae19dad56e246bcb2f120b4e7d30"
+      },
+      {
+        "name": "exp alterado (MAC original)",
+        "id": "0193a1c7-2f00-7000-8000-0000000000aa",
+        "ownerRef": "user_1",
+        "now": 1731336340,
+        "token": "1731336401.2f233202f96da62e3f1645ab77dd612df651ae19dad56e246bcb2f120b4e7d3a"
+      },
+      {
+        "name": "vacío",
+        "id": "0193a1c7-2f00-7000-8000-0000000000aa",
+        "ownerRef": "user_1",
+        "now": 1731336340,
+        "token": ""
+      },
+      {
+        "name": "sin punto",
+        "id": "0193a1c7-2f00-7000-8000-0000000000aa",
+        "ownerRef": "user_1",
+        "now": 1731336340,
+        "token": "17313364002f233202f96da62e3f1645ab77dd612df651ae19dad56e246bcb2f120b4e7d3a"
+      },
+      {
+        "name": "sin MAC",
+        "id": "0193a1c7-2f00-7000-8000-0000000000aa",
+        "ownerRef": "user_1",
+        "now": 1731336340,
+        "token": "1731336400."
+      },
+      {
+        "name": "sin exp",
+        "id": "0193a1c7-2f00-7000-8000-0000000000aa",
+        "ownerRef": "user_1",
+        "now": 1731336340,
+        "token": ".2f233202f96da62e3f1645ab77dd612df651ae19dad56e246bcb2f120b4e7d3a"
+      },
+      {
+        "name": "MAC corto",
+        "id": "0193a1c7-2f00-7000-8000-0000000000aa",
+        "ownerRef": "user_1",
+        "now": 1731336340,
+        "token": "1731336400.2f233202f96da62e3f1645ab77dd612df651ae19dad56e246bcb2f120b4e7d"
+      },
+      {
+        "name": "MAC largo",
+        "id": "0193a1c7-2f00-7000-8000-0000000000aa",
+        "ownerRef": "user_1",
+        "now": 1731336340,
+        "token": "1731336400.2f233202f96da62e3f1645ab77dd612df651ae19dad56e246bcb2f120b4e7d3a00"
+      },
+      {
+        "name": "MAC no hex",
+        "id": "0193a1c7-2f00-7000-8000-0000000000aa",
+        "ownerRef": "user_1",
+        "now": 1731336340,
+        "token": "1731336400.zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      },
+      {
+        "name": "MAC en mayúsculas",
+        "id": "0193a1c7-2f00-7000-8000-0000000000aa",
+        "ownerRef": "user_1",
+        "now": 1731336340,
+        "token": "1731336400.2F233202F96DA62E3F1645AB77DD612DF651AE19DAD56E246BCB2F120B4E7D3A"
+      },
+      {
+        "name": "varios puntos",
+        "id": "0193a1c7-2f00-7000-8000-0000000000aa",
+        "ownerRef": "user_1",
+        "now": 1731336340,
+        "token": "1731336400.2f233202f96da62e3f1645ab77dd612df651ae19dad56e246bcb2f120b4e7d3a.2f233202f96da62e3f1645ab77dd612df651ae19dad56e246bcb2f120b4e7d3a"
+      },
+      {
+        "name": "exp con signo +",
+        "id": "0193a1c7-2f00-7000-8000-0000000000aa",
+        "ownerRef": "user_1",
+        "now": 1731336340,
+        "token": "+1731336400.2f233202f96da62e3f1645ab77dd612df651ae19dad56e246bcb2f120b4e7d3a"
+      },
+      {
+        "name": "exp negativo",
+        "id": "0193a1c7-2f00-7000-8000-0000000000aa",
+        "ownerRef": "user_1",
+        "now": 1731336340,
+        "token": "-1731336400.2f233202f96da62e3f1645ab77dd612df651ae19dad56e246bcb2f120b4e7d3a"
+      },
+      {
+        "name": "exp con ceros a la izquierda (firma válida sobre el exp canónico)",
+        "id": "0193a1c7-2f00-7000-8000-0000000000aa",
+        "ownerRef": "user_1",
+        "now": 1731336340,
+        "token": "01731336400.2f233202f96da62e3f1645ab77dd612df651ae19dad56e246bcb2f120b4e7d3a"
+      },
+      {
+        "name": "exp decimal",
+        "id": "0193a1c7-2f00-7000-8000-0000000000aa",
+        "ownerRef": "user_1",
+        "now": 1731336340,
+        "token": "1731336400.0.2f233202f96da62e3f1645ab77dd612df651ae19dad56e246bcb2f120b4e7d3a"
+      },
+      {
+        "name": "exp con espacios",
+        "id": "0193a1c7-2f00-7000-8000-0000000000aa",
+        "ownerRef": "user_1",
+        "now": 1731336340,
+        "token": " 1731336400.2f233202f96da62e3f1645ab77dd612df651ae19dad56e246bcb2f120b4e7d3a"
+      },
+      {
+        "name": "exp en notación exponencial",
+        "id": "0193a1c7-2f00-7000-8000-0000000000aa",
+        "ownerRef": "user_1",
+        "now": 1731336340,
+        "token": "1.731336400e9.2f233202f96da62e3f1645ab77dd612df651ae19dad56e246bcb2f120b4e7d3a"
+      },
+      {
+        "name": "exp con dígitos Unicode (superíndice ²)",
+        "id": "0193a1c7-2f00-7000-8000-0000000000aa",
+        "ownerRef": "user_1",
+        "now": 1731336340,
+        "token": "².2f233202f96da62e3f1645ab77dd612df651ae19dad56e246bcb2f120b4e7d3a"
+      },
+      {
+        "name": "exp con dígitos Unicode (árabe-índicos)",
+        "id": "0193a1c7-2f00-7000-8000-0000000000aa",
+        "ownerRef": "user_1",
+        "now": 1731336340,
+        "token": "١٧٣١٣٣٦٤٠٠.2f233202f96da62e3f1645ab77dd612df651ae19dad56e246bcb2f120b4e7d3a"
+      },
+      {
+        "name": "exp con dígitos Unicode (anchos)",
+        "id": "0193a1c7-2f00-7000-8000-0000000000aa",
+        "ownerRef": "user_1",
+        "now": 1731336340,
+        "token": "１７３１３３６４００.2f233202f96da62e3f1645ab77dd612df651ae19dad56e246bcb2f120b4e7d3a"
+      },
+      {
+        "name": "exp demasiado largo (13 dígitos)",
+        "id": "0193a1c7-2f00-7000-8000-0000000000aa",
+        "ownerRef": "user_1",
+        "now": 1731336340,
+        "token": "1111111111111.2f233202f96da62e3f1645ab77dd612df651ae19dad56e246bcb2f120b4e7d3a"
+      }
+    ],
+    "_negative_comment": "Todo caso de 'negative' debe rechazarse (verify = false → handleUpload 403, nunca 500). now en segundos Unix. Formato canónico: ver PROTOCOL.md."
+  },
+  "webhookNegative": {
+    "_comment": "Cada caso usa el payload y secret de 'webhook'. reason: malformed (cabecera inválida), mismatch (firma no coincide) o expired (fuera de la tolerancia de 300 s). Los positivos de 'accepted' deben devolver el mismo evento que 'webhook'.",
+    "rejected": [
+      {
+        "name": "vacía",
+        "signature": "",
+        "now": 1731250000,
+        "reason": "missing"
+      },
+      {
+        "name": "sin t",
+        "signature": "v1=166c8f0e94e7d85184c519bc1d48196a30cfcc00466de8532a2254019378617a",
+        "now": 1731250000,
+        "reason": "malformed"
+      },
+      {
+        "name": "sin v1",
+        "signature": "t=1731250000",
+        "now": 1731250000,
+        "reason": "malformed"
+      },
+      {
+        "name": "t no numérico",
+        "signature": "t=abc,v1=166c8f0e94e7d85184c519bc1d48196a30cfcc00466de8532a2254019378617a",
+        "now": 1731250000,
+        "reason": "malformed"
+      },
+      {
+        "name": "t con ceros a la izquierda (firma válida sobre el t crudo)",
+        "signature": "t=01731250000,v1=10622937c8d8b30efd74e49f9f875973dfbee09e8fff61abf7488a3d83e50cac",
+        "now": 1731250000,
+        "reason": "malformed"
+      },
+      {
+        "name": "t con signo + (firma válida sobre el t crudo)",
+        "signature": "t=+1731250000,v1=cf373dcd4cea7a86ae599d3ff86095dcf232cadcc167d70da6f2b91cdfc55ecc",
+        "now": 1731250000,
+        "reason": "malformed"
+      },
+      {
+        "name": "t negativo",
+        "signature": "t=-1731250000,v1=166c8f0e94e7d85184c519bc1d48196a30cfcc00466de8532a2254019378617a",
+        "now": 1731250000,
+        "reason": "malformed"
+      },
+      {
+        "name": "t decimal (firma válida sobre el t crudo)",
+        "signature": "t=1731250000.0,v1=1c1e9ca3e54d61a88d95377851a1cc51784fd6f56ac6d0c62189ec872398b17b",
+        "now": 1731250000,
+        "reason": "malformed"
+      },
+      {
+        "name": "t con dígitos Unicode (superíndice, firma válida sobre el t crudo)",
+        "signature": "t=²,v1=3f673a928e1b125bda1476bb5a3dcde4239871461869dc7fc258d53af08441ad",
+        "now": 1731250000,
+        "reason": "malformed"
+      },
+      {
+        "name": "t con dígitos Unicode (árabe-índicos, firma válida sobre el t crudo)",
+        "signature": "t=١٧٣١٢٥٠٠٠٠,v1=638aa9c9db9f1f17c4e6d4dd63a69211129df853807fadee68d6e3ad27432913",
+        "now": 1731250000,
+        "reason": "malformed"
+      },
+      {
+        "name": "t repetido",
+        "signature": "t=1731250000,t=1731250000,v1=166c8f0e94e7d85184c519bc1d48196a30cfcc00466de8532a2254019378617a",
+        "now": 1731250000,
+        "reason": "malformed"
+      },
+      {
+        "name": "v1 no hex",
+        "signature": "t=1731250000,v1=zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+        "now": 1731250000,
+        "reason": "malformed"
+      },
+      {
+        "name": "v1 corto",
+        "signature": "t=1731250000,v1=166c8f0e94e7d85184c519bc1d48196a30cfcc00466de8532a225401937861",
+        "now": 1731250000,
+        "reason": "malformed"
+      },
+      {
+        "name": "v1 alterado",
+        "signature": "t=1731250000,v1=166c8f0e94e7d85184c519bc1d48196a30cfcc00466de8532a22540193786170",
+        "now": 1731250000,
+        "reason": "mismatch"
+      },
+      {
+        "name": "v1 en mayúsculas",
+        "signature": "t=1731250000,v1=166C8F0E94E7D85184C519BC1D48196A30CFCC00466DE8532A2254019378617A",
+        "now": 1731250000,
+        "reason": "malformed"
+      },
+      {
+        "name": "varios v1, ninguno válido",
+        "signature": "t=1731250000,v1=166c8f0e94e7d85184c519bc1d48196a30cfcc00466de8532a22540193786170,v1=a888bb8d04eecbb2f282f07bee88a6c623142663cca1689e4233835aa825a570",
+        "now": 1731250000,
+        "reason": "mismatch"
+      },
+      {
+        "name": "firma de otro t",
+        "signature": "t=1731250001,v1=166c8f0e94e7d85184c519bc1d48196a30cfcc00466de8532a2254019378617a",
+        "now": 1731250000,
+        "reason": "mismatch"
+      },
+      {
+        "name": "vencido (+301 s)",
+        "signature": "t=1731250000,v1=166c8f0e94e7d85184c519bc1d48196a30cfcc00466de8532a2254019378617a",
+        "now": 1731250301,
+        "reason": "expired"
+      },
+      {
+        "name": "del futuro (-301 s)",
+        "signature": "t=1731250000,v1=166c8f0e94e7d85184c519bc1d48196a30cfcc00466de8532a2254019378617a",
+        "now": 1731249699,
+        "reason": "expired"
+      }
+    ],
+    "accepted": [
+      {
+        "name": "varios v1, el válido primero",
+        "signature": "t=1731250000,v1=166c8f0e94e7d85184c519bc1d48196a30cfcc00466de8532a2254019378617a,v1=166c8f0e94e7d85184c519bc1d48196a30cfcc00466de8532a22540193786170",
+        "now": 1731250010
+      },
+      {
+        "name": "varios v1, el válido último (rotación de secret)",
+        "signature": "t=1731250000,v1=166c8f0e94e7d85184c519bc1d48196a30cfcc00466de8532a22540193786170,v1=166c8f0e94e7d85184c519bc1d48196a30cfcc00466de8532a2254019378617a",
+        "now": 1731250010
+      },
+      {
+        "name": "clave desconocida ignorada",
+        "signature": "v0=x,t=1731250000,v1=166c8f0e94e7d85184c519bc1d48196a30cfcc00466de8532a2254019378617a",
+        "now": 1731250010
+      },
+      {
+        "name": "espacios tras las comas",
+        "signature": "t=1731250000, v1=166c8f0e94e7d85184c519bc1d48196a30cfcc00466de8532a2254019378617a",
+        "now": 1731250010
+      }
+    ]
+  },
+  "declaredChecksum": {
+    "_comment": "sha256 de la acción create (Checksum declarado, ver PROTOCOL.md): 64 hex en minúscula, el SHA-256 de los bytes. handleUpload pasa los válidos a POST /files como sha256 y rechaza los inválidos con 400 validation sin llamar a la API; ausente o null no se manda. En CreateUploadInput/UploadInput de Go (campo string), \"\" equivale a ausente; handleUpload sí lo rechaza.",
+    "content": "hola file-service\n",
+    "sha256": "60489f0a705abc560b4381c7ac80fa6bca076aa219fafc39df86967d92a1660f",
+    "invalid": [
+      {
+        "name": "mayúsculas",
+        "value": "60489F0A705ABC560B4381C7AC80FA6BCA076AA219FAFC39DF86967D92A1660F"
+      },
+      {
+        "name": "63 caracteres",
+        "value": "60489f0a705abc560b4381c7ac80fa6bca076aa219fafc39df86967d92a1660"
+      },
+      {
+        "name": "65 caracteres",
+        "value": "60489f0a705abc560b4381c7ac80fa6bca076aa219fafc39df86967d92a1660f0"
+      },
+      {
+        "name": "no hex",
+        "value": "g0489f0a705abc560b4381c7ac80fa6bca076aa219fafc39df86967d92a1660f"
+      },
+      {
+        "name": "base64",
+        "value": "YEifCnBavFYLQ4HHrID6a8oHaqIZ+vw534aWfZKhZg8="
+      },
+      {
+        "name": "con prefijo sha256:",
+        "value": "sha256:60489f0a705abc560b4381c7ac80fa6bca076aa219fafc39df86967d92a1660f"
+      },
+      {
+        "name": "vacío",
+        "value": ""
+      },
+      {
+        "name": "número",
+        "value": 123
+      },
+      {
+        "name": "lista",
+        "value": [
+          "60489f0a705abc560b4381c7ac80fa6bca076aa219fafc39df86967d92a1660f"
+        ]
       }
     ]
   }

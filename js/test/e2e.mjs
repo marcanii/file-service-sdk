@@ -25,6 +25,13 @@ const url = await fs.getDownloadUrl(created.id);
 assert.deepEqual(Buffer.from(await (await fetch(url)).arrayBuffer()), text);
 step("getDownloadUrl entrega los mismos bytes");
 
+// 2b. Uso del Proyecto contra su Cuota.
+{
+  const u = await fs.usage();
+  assert.ok(u.usedBytes > 0 && u.fileCount >= 1 && u.maxFileSize > 0 && Array.isArray(u.allowedMimeTypes));
+  step("usage() devuelve el uso y los límites del Proyecto");
+}
+
 // 3. Subida desde el servidor en una sola llamada (simple y multipart).
 const small = await fs.upload({ name: "reporte.pdf", mimeType: "application/pdf", data: Buffer.from("%PDF-1.7\nreporte generado\n"), ownerRef: "user_42" });
 assert.equal(small.status, "AVAILABLE");
@@ -35,6 +42,19 @@ const big = randomBytes(33 << 20);
 const bigFile = await fs.upload({ name: "grande.bin", mimeType: "application/octet-stream", data: big }, { wait: { timeoutMs: 120_000 } });
 assert.equal(bigFile.contentHash, sha(big));
 step("upload() multipart (33 MB)");
+
+// 3b. Checksum declarado: en simple lo garantiza el storage; en multipart, la verificación del servicio.
+const otro = sha(Buffer.from("otro contenido"));
+await assert.rejects(
+  fs.upload({ name: "mal.txt", mimeType: "text/plain", data: Buffer.from("hola checksum\n"), sha256: otro }),
+  (err) => err instanceof FileServiceError && err.code === "checksum_mismatch" && err.status === 400,
+);
+step("upload() simple con sha256 incorrecto → checksum_mismatch");
+await assert.rejects(
+  fs.upload({ name: "mal.bin", mimeType: "application/octet-stream", data: big, sha256: otro }, { wait: { timeoutMs: 120_000 } }),
+  (err) => err instanceof FileRejectedError && err.code === "failed" && err.file.status === "FAILED",
+);
+step("upload() multipart con sha256 incorrecto → FAILED (FileRejectedError)");
 
 // 4. Listado por usuario.
 const mine = [];
@@ -56,6 +76,15 @@ await fs.delete(created.id);
 assert.ok((await fs.get(created.id)).deletedAt);
 assert.equal((await fs.restore(created.id)).deletedAt, undefined);
 step("delete + restore");
+
+// 6b. Purga anticipada: irreversible, también desde la papelera.
+const doomed = await fs.upload({ name: "purgar.txt", mimeType: "text/plain", data: Buffer.from(`purgar ${randomBytes(8).toString("hex")}\n`) });
+await fs.delete(doomed.id);
+await fs.purge(doomed.id, { actor: "user_42" });
+await assert.rejects(fs.get(doomed.id), (e) => e instanceof FileServiceError && e.code === "not_found");
+await assert.rejects(fs.restore(doomed.id), (e) => e instanceof FileServiceError && e.code === "not_found");
+await assert.rejects(fs.purge(doomed.id), (e) => e instanceof FileServiceError && e.code === "not_found");
+step("purge() borra en el acto, sin restore; purgar de nuevo → not_found");
 
 // 7. Rechazo: un ejecutable declarado como texto.
 await assert.rejects(

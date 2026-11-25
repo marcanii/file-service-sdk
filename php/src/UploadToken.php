@@ -28,7 +28,7 @@ final class UploadToken
      */
     public static function verify(string $apiKey, string $token, string $id, string $ownerRef, int $now): bool
     {
-        if (preg_match('/^([0-9]{1,19})\.([0-9a-fA-F]{64})$/D', $token, $m) !== 1) {
+        if (preg_match('/^([1-9][0-9]{0,11})\.([0-9a-f]{64})$/D', $token, $m) !== 1) {
             return false;
         }
         $exp = (int) $m[1];
@@ -36,7 +36,7 @@ final class UploadToken
             return false;
         }
 
-        return hash_equals(self::mac($apiKey, $id, $ownerRef, $exp), strtolower($m[2]));
+        return hash_equals(self::mac($apiKey, $id, $ownerRef, $exp), $m[2]);
     }
 
     private static function mac(string $apiKey, string $id, string $ownerRef, int $exp): string

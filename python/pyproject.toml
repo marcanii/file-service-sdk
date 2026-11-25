@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ntropix-file-service"
-version = "1.1.0"
+version = "1.2.0"
 description = "SDK de Python del File Service de ntropix: subir, consultar y servir archivos desde el backend de un proyecto."
 readme = "README.md"
 license = "MIT"

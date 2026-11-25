@@ -35,6 +35,8 @@ final class FileInfo
         /** Presente si el file está en la papelera. */
         public readonly ?string $deletedAt,
         public readonly ?array $download,
+        /** Motivo del fallo o la cuarentena. Solo viene en los Eventos `file.failed` y `file.quarantined`. */
+        public readonly ?string $reason = null,
     ) {
     }
 
@@ -53,14 +55,7 @@ final class FileInfo
                 'expiresAt' => (string) ($raw['download']['expires_at'] ?? ''),
             ];
         }
-        $status = FileStatus::tryFrom((string) ($raw['status'] ?? ''));
-        if ($status === null) {
-            throw new FileServiceException(
-                0,
-                'internal',
-                'estado de file desconocido en la respuesta del File Service',
-            );
-        }
+        $status = FileStatus::tryFrom((string) ($raw['status'] ?? '')) ?? FileStatus::Unknown;
 
         return new self(
             id: (string) ($raw['id'] ?? ''),
@@ -71,12 +66,13 @@ final class FileInfo
             size: (int) ($raw['size_bytes'] ?? 0),
             contentHash: self::optString($raw['content_hash'] ?? null),
             ownerRef: self::optString($raw['owner_ref'] ?? null),
-            visibility: Visibility::tryFrom((string) ($raw['visibility'] ?? '')) ?? Visibility::Private,
+            visibility: Visibility::tryFrom((string) ($raw['visibility'] ?? '')) ?? Visibility::Unknown,
             publicUrl: self::optString($raw['public_url'] ?? null),
             metadata: is_array($raw['metadata'] ?? null) ? $raw['metadata'] : [],
             createdAt: (string) ($raw['created_at'] ?? ''),
             deletedAt: self::optString($raw['deleted_at'] ?? null),
             download: $download,
+            reason: self::optString($raw['reason'] ?? null),
         );
     }
 
