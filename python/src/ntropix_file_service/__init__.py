@@ -19,12 +19,13 @@ from .models import (
     PartUrl,
     UploadInstructions,
     UploadResult,
+    Usage,
     Visibility,
     WebhookEvent,
     WebhookEventType,
 )
 
-__version__ = "1.1.0"
+from ._version import __version__  # noqa: E402
 
 __all__ = [
     "FileService",
@@ -33,6 +34,7 @@ __all__ = [
     "WebhookSignatureError",
     "FileInfo",
     "FilePage",
+    "Usage",
     "DownloadInfo",
     "UploadInstructions",
     "CreatedUpload",

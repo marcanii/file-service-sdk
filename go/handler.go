@@ -56,6 +56,7 @@ type handleRequest struct {
 	MimeType    string         `json:"mimeType"`
 	Size        int64          `json:"size"`
 	Metadata    map[string]any `json:"metadata"`
+	SHA256      *string        `json:"sha256"`
 	ID          string         `json:"id"`
 	Token       string         `json:"token"`
 	PartNumbers []int          `json:"partNumbers"`
@@ -127,6 +128,13 @@ func (c *Client) HandleUpload(ctx context.Context, body []byte, opts HandleOptio
 }
 
 func (c *Client) handleCreate(ctx context.Context, req handleRequest, opts HandleOptions) UploadResult {
+	var sha string
+	if req.SHA256 != nil {
+		if !isLowerHex(*req.SHA256, sha256.Size*2) {
+			return errorResult(http.StatusBadRequest, CodeValidation, "sha256 debe ser 64 hex en minúscula")
+		}
+		sha = *req.SHA256
+	}
 	created, err := c.CreateUpload(ctx, CreateUploadInput{
 		Name:       req.Name,
 		MimeType:   req.MimeType,
@@ -134,6 +142,7 @@ func (c *Client) handleCreate(ctx context.Context, req handleRequest, opts Handl
 		OwnerRef:   opts.OwnerRef,
 		Visibility: opts.Visibility,
 		Metadata:   mergeMetadata(req.Metadata, opts.Metadata),
+		SHA256:     sha,
 	})
 	if err != nil {
 		return errorFromErr(err)
@@ -289,7 +298,7 @@ func signUploadToken(apiKey, id, ownerRef string, exp int64) string {
 // verifyUploadToken comprueba vigencia (exp > now) y firma, en tiempo constante.
 func verifyUploadToken(apiKey, token, id, ownerRef string, now time.Time) bool {
 	expStr, sig, ok := strings.Cut(token, ".")
-	if !ok {
+	if !ok || !isCanonicalUnix(expStr) || !isLowerHex(sig, sha256.Size*2) {
 		return false
 	}
 	exp, err := strconv.ParseInt(expStr, 10, 64)

@@ -11,6 +11,8 @@ info:
     Cada archivo se verifica antes de quedar disponible (SHA-256, tipo real del contenido,
     deduplicación).
 
+    **Límites de tasa:** `429 rate_limited` (con `Retry-After`) puede venir del límite por Proyecto o del límite por IP del cliente, que se aplica antes de autenticar.
+
     ## Integración rápida
 
     Tu backend monta **un endpoint de subida** con el SDK de su lenguaje y el navegador llama a
@@ -53,7 +55,8 @@ info:
 
     Eventos `file.available`, `file.failed`, `file.quarantined` (se configuran en el Panel).
     Header `FS-Signature: t=<unix>,v1=<hex(HMAC-SHA256(secret, "<t>.<body crudo>"))>`; rechazar si
-    `t` tiene más de 5 minutos. Entrega *at-least-once*: deduplicar por `id`. Los SDKs lo verifican
+    `t` tiene más de 5 minutos. El `data.file` tiene el formato de `GET /files/{id}` sin `download`,
+    más `reason` en `file.failed` y `file.quarantined`. Entrega *at-least-once*: deduplicar por `id`. Los SDKs lo verifican
     con `verifyWebhook`.
 servers:
   - url: /
@@ -65,6 +68,8 @@ tags:
     description: Consultar, listar, cambiar visibilidad y papelera.
   - name: Público
     description: URLs estables de archivos públicos, sin autenticación.
+  - name: Webhooks
+    description: Eventos salientes hacia el Proyecto.
   - name: Salud
     description: Liveness y readiness.
 security:
@@ -91,13 +96,14 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/CreatedUpload" }
-        "400": { $ref: "#/components/responses/Error" }
-        "401": { $ref: "#/components/responses/Error" }
-        "403": { $ref: "#/components/responses/Error" }
-        "413": { $ref: "#/components/responses/Error" }
-        "415": { $ref: "#/components/responses/Error" }
-        "429": { $ref: "#/components/responses/Error" }
-        "507": { $ref: "#/components/responses/Error" }
+        "400": { $ref: "#/components/responses/Validation" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/ForbiddenWrite" }
+        "413": { $ref: "#/components/responses/TooLarge" }
+        "415": { $ref: "#/components/responses/TypeNotAllowed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/Internal" }
+        "507": { $ref: "#/components/responses/InsufficientStorage" }
     get:
       tags: [Archivos]
       operationId: listFiles
@@ -120,7 +126,11 @@ paths:
                 properties:
                   files: { type: array, items: { $ref: "#/components/schemas/File" } }
                   next_cursor: { type: string }
-        "401": { $ref: "#/components/responses/Error" }
+        "400": { $ref: "#/components/responses/Validation" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/ForbiddenProject" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/Internal" }
 
   /files/{id}/parts:
     post:
@@ -154,8 +164,13 @@ paths:
                         part_number: { type: integer }
                         url: { type: string, format: uri }
                   expires_at: { type: string, format: date-time }
-        "404": { $ref: "#/components/responses/Error" }
-        "409": { $ref: "#/components/responses/Error" }
+        "400": { $ref: "#/components/responses/Validation" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/ForbiddenWrite" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/InvalidState" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/Internal" }
 
   /files/{id}/complete:
     post:
@@ -184,9 +199,14 @@ paths:
                       etag: { type: string }
       responses:
         "200": { $ref: "#/components/responses/File" }
-        "404": { $ref: "#/components/responses/Error" }
-        "409": { $ref: "#/components/responses/Error" }
-        "413": { $ref: "#/components/responses/Error" }
+        "400": { $ref: "#/components/responses/Validation" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/ForbiddenWrite" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/InvalidStateOrNoBytes" }
+        "413": { $ref: "#/components/responses/TooLarge" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/Internal" }
 
   /files/{id}:
     get:
@@ -203,7 +223,12 @@ paths:
           schema: { type: string, enum: [attachment, inline] }
       responses:
         "200": { $ref: "#/components/responses/File" }
-        "404": { $ref: "#/components/responses/Error" }
+        "400": { $ref: "#/components/responses/Validation" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/ForbiddenProject" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/Internal" }
     patch:
       tags: [Archivos]
       operationId: updateFile
@@ -220,35 +245,105 @@ paths:
                 original_name: { type: string, maxLength: 255 }
       responses:
         "200": { $ref: "#/components/responses/File" }
-        "400": { $ref: "#/components/responses/Error" }
-        "404": { $ref: "#/components/responses/Error" }
+        "400": { $ref: "#/components/responses/Validation" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/ForbiddenWrite" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/Internal" }
     delete:
       tags: [Archivos]
       operationId: deleteFile
       summary: Mandar a la papelera
-      description: Borrado lógico, recuperable durante los días de papelera del Proyecto.
+      description: |
+        Borrado lógico, recuperable durante los días de papelera del Proyecto. Sobre una subida en
+        curso (`PENDING`/`UPLOADING`) la **cancela**: ya no se puede restaurar ni completar, y el
+        servicio libera lo que tenía reservado de forma asíncrona.
       parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/Actor" }]
       responses:
         "204": { description: En la papelera }
-        "404": { $ref: "#/components/responses/Error" }
+        "400": { $ref: "#/components/responses/Validation" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/ForbiddenWrite" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/Internal" }
 
   /files/{id}/restore:
     post:
       tags: [Archivos]
       operationId: restoreFile
       summary: Recuperar de la papelera
+      description: |
+        `404` si el file no existe, es de otro Proyecto o no está en la papelera (por ejemplo, ya fue
+        purgado). `409 invalid_state` si es una subida en curso (`PENDING`/`UPLOADING`): el `DELETE`
+        la canceló y no se puede restaurar.
       parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/Actor" }]
       responses:
         "200": { $ref: "#/components/responses/File" }
-        "404": { $ref: "#/components/responses/Error" }
-        "409": { $ref: "#/components/responses/Error" }
+        "400": { $ref: "#/components/responses/Validation" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/ForbiddenWrite" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/InvalidState" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/Internal" }
+
+  /files/{id}/purge:
+    post:
+      tags: [Archivos]
+      operationId: purgeFile
+      summary: Purga anticipada (borrado definitivo)
+      description: |
+        Borra el file en el acto y de forma **irreversible**, sin esperar los días de papelera (por
+        ejemplo, ante un pedido de borrado de datos personales): deja de listarse, no se puede
+        restaurar ni descargar y su URL pública da `404`. Vale sobre un file `READY`, `AVAILABLE`,
+        `FAILED` o `QUARANTINED`, esté o no en la papelera.
+
+        Se borra **el file**, no el contenido: si otro file del Proyecto comparte los mismos bytes
+        (dedup), esos bytes siguen. Si no, el servicio los borra del storage en su ciclo normal de
+        limpieza (en pocos días), y la Cuota se libera recién entonces. No emite webhook (un evento
+        que ya estaba encolado para el file, como `file.available`, se entrega igual).
+
+        `409 invalid_state` sobre una subida en curso (`PENDING`/`UPLOADING`: para eso está
+        `DELETE`); `404` si el file no existe, es de otro Proyecto o ya fue purgado.
+      parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/Actor" }]
+      responses:
+        "204": { description: Purgado }
+        "400": { $ref: "#/components/responses/Validation" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/ForbiddenWrite" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/InvalidState" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/Internal" }
+
+  /usage:
+    get:
+      tags: [Archivos]
+      operationId: getUsage
+      summary: Uso y Cuota del Proyecto
+      description: |
+        Bytes usados por el Proyecto autenticado (incluye subidas en curso, que reservan su tamaño
+        declarado), su Cuota, la cantidad de files vivos (fuera de la papelera) y los límites de su
+        Política. Sirve para saber cuánto queda antes de iniciar una subida. Funciona con una key
+        `read`.
+      responses:
+        "200":
+          description: Uso del Proyecto
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Usage" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/Internal" }
 
   /p/{id}/{name}:
     get:
       tags: [Público]
       operationId: publicFile
       summary: URL estable de un archivo público
-      description: Sin autenticación. `302` a una URL firmada corta; `404` si el file no es público, no está disponible o está en la papelera.
+      description: "Sin autenticación. `302` a una URL firmada corta; `404` si el file no es público, no está disponible o está en la papelera. Limitado por IP del cliente (`PUBLIC_RATE_LIMIT_RPS`): al excederlo, `429 rate_limited`."
       security: []
       parameters:
         - { $ref: "#/components/parameters/Id" }
@@ -256,6 +351,21 @@ paths:
       responses:
         "302": { description: Redirección a la URL firmada }
         "404": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /p/{id}:
+    get:
+      tags: [Público]
+      operationId: publicFileNoName
+      summary: URL estable de un archivo público (sin nombre)
+      description: Igual que `/p/{id}/{name}`, sin el segmento decorativo. Un `id` que no es UUID responde `404`.
+      security: []
+      parameters:
+        - { $ref: "#/components/parameters/Id" }
+      responses:
+        "302": { description: Redirección a la URL firmada }
+        "404": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
 
   /healthz:
     get:
@@ -274,6 +384,38 @@ paths:
       responses:
         "200": { description: Listo }
         "503": { $ref: "#/components/responses/Error" }
+
+webhooks:
+  fileEvent:
+    post:
+      tags: [Webhooks]
+      operationId: fileEvent
+      summary: Evento de un archivo (file.available, file.failed, file.quarantined)
+      description: |
+        El servicio hace `POST` a la URL de webhook del Proyecto (se configura en el Panel). Responder
+        `2xx` confirma la entrega; cualquier otra respuesta o un error de red se reintenta con backoff
+        (~24 h en total). Entrega *at-least-once*: deduplicar por `id` del evento.
+
+        Headers: `FS-Event` (tipo), `FS-Delivery` (id de la entrega), `FS-Attempt` (nro. de intento) y
+        `FS-Signature: t=<unix>,v1=<hex(HMAC-SHA256(secret, "<t>.<body crudo>"))>`. Verificar la firma
+        sobre el body crudo y rechazar si `t` tiene más de 5 minutos.
+      security: []
+      parameters:
+        - name: FS-Signature
+          in: header
+          required: true
+          description: "`t=<unix>,v1=<hex>`: HMAC-SHA256 con el secreto del webhook del Proyecto sobre `<t>.<body crudo>`."
+          schema: { type: string }
+        - { name: FS-Event, in: header, required: true, schema: { type: string, enum: [file.available, file.failed, file.quarantined] } }
+        - { name: FS-Delivery, in: header, required: true, schema: { type: string, format: uuid } }
+        - { name: FS-Attempt, in: header, required: true, schema: { type: integer, minimum: 1 } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/WebhookEvent" }
+      responses:
+        "2XX": { description: Entrega confirmada }
 
 components:
   securitySchemes:
@@ -305,6 +447,91 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/File" }
+    Validation:
+      description: "Validación (`validation`): UUID inválido, cursor inválido, body inválido, multipart sin partes o con etags inválidos, tamaño final distinto del declarado"
+      headers:
+        X-Request-ID: { $ref: "#/components/headers/RequestId" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Internal:
+      description: "Error interno (`internal`); incluí el `X-Request-ID` al reportarlo"
+      headers:
+        X-Request-ID: { $ref: "#/components/headers/RequestId" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthorized:
+      description: "Falta la API key o es inválida (`unauthorized`)"
+      headers:
+        X-Request-ID: { $ref: "#/components/headers/RequestId" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    ForbiddenProject:
+      description: "Proyecto desactivado (`project_disabled`)"
+      headers:
+        X-Request-ID: { $ref: "#/components/headers/RequestId" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    ForbiddenWrite:
+      description: "Key de scope `read` (`forbidden`) o Proyecto desactivado (`project_disabled`)"
+      headers:
+        X-Request-ID: { $ref: "#/components/headers/RequestId" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: "No existe o es de otro Proyecto (`not_found`)"
+      headers:
+        X-Request-ID: { $ref: "#/components/headers/RequestId" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    InvalidState:
+      description: "El estado actual del file no permite la operación (`invalid_state`)"
+      headers:
+        X-Request-ID: { $ref: "#/components/headers/RequestId" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    InvalidStateOrNoBytes:
+      description: "`invalid_state` (el estado no permite cerrar) o `no_bytes` (los bytes no están en el storage)"
+      headers:
+        X-Request-ID: { $ref: "#/components/headers/RequestId" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    TooLarge:
+      description: "Excede el máximo de la Política del Proyecto (`too_large`)"
+      headers:
+        X-Request-ID: { $ref: "#/components/headers/RequestId" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    TypeNotAllowed:
+      description: "Tipo no permitido por la Política del Proyecto (`type_not_allowed`)"
+      headers:
+        X-Request-ID: { $ref: "#/components/headers/RequestId" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    InsufficientStorage:
+      description: "Cuota del Proyecto agotada (`quota_exceeded`) o storage lleno (`storage_full`)"
+      headers:
+        X-Request-ID: { $ref: "#/components/headers/RequestId" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    RateLimited:
+      description: "Límite de tasa (`rate_limited`), por IP o por Proyecto"
+      headers:
+        X-Request-ID: { $ref: "#/components/headers/RequestId" }
+        Retry-After: { description: Segundos a esperar antes de reintentar, schema: { type: integer } }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
     Error:
       description: Error
       headers:
@@ -313,6 +540,15 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
   schemas:
+    Usage:
+      type: object
+      required: [used_bytes, quota_bytes, file_count, max_file_size, allowed_mime_types]
+      properties:
+        used_bytes: { type: integer, format: int64, description: Bytes ocupados por el Proyecto }
+        quota_bytes: { type: integer, format: int64, description: "Cuota de almacenamiento; `0` = sin cuota" }
+        file_count: { type: integer, description: Files vivos (fuera de la papelera) }
+        max_file_size: { type: integer, format: int64, description: Tamaño máximo por file, en bytes }
+        allowed_mime_types: { type: array, items: { type: string }, description: "Tipos admitidos (admite `image/*`); vacío = cualquiera" }
     Status:
       type: string
       enum: [PENDING, UPLOADING, READY, AVAILABLE, FAILED, QUARANTINED]
@@ -326,17 +562,25 @@ components:
       properties:
         original_name: { type: string, maxLength: 255, description: Sin separadores de ruta }
         mime_type: { type: string, description: Tipo declarado; el real lo verifica el worker }
-        size_bytes: { type: integer, minimum: 1, description: Tamaño exacto; el storage rechaza otro }
+        size_bytes: { type: integer, minimum: 1, description: "Tamaño exacto: el storage rechaza un PUT o una parte de otro tamaño, y complete rechaza (400, FAILED) un tamaño final distinto" }
         owner_ref: { type: string, description: Id opaco del Usuario final en el sistema del Proyecto }
         visibility: { $ref: "#/components/schemas/Visibility" }
-        metadata: { type: object, additionalProperties: true, description: "JSON libre, hasta 16 KB" }
+        metadata: { type: object, additionalProperties: true, description: "Objeto JSON libre (un array o string → 400), hasta 16 KB" }
+        sha256:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+          description: |
+            Checksum declarado (opcional): SHA-256 del contenido en hex minúscula, mismo formato que `content_hash`
+            (otro formato → 400). En subida simple viaja firmado en el PUT (`x-amz-checksum-sha256` en `upload.headers`):
+            el storage rechaza (400) un contenido distinto sin escribir nada, y `complete` da `409 no_bytes`.
+            Nunca reemplaza al `content_hash` que calcula el servicio ni participa de la dedup.
     UploadInstructions:
       type: object
       required: [mode, expires_at]
       properties:
         mode: { type: string, enum: [simple, multipart] }
         url: { type: string, format: uri, description: "simple: URL del PUT" }
-        headers: { type: object, additionalProperties: { type: string }, description: "simple: headers del PUT" }
+        headers: { type: object, additionalProperties: { type: string }, description: "simple: headers del PUT, a mandar tal cual (incluye If-None-Match: * firmado: la URL es de escritura única; otro PUT da 412; y x-amz-checksum-sha256 si se declaró sha256)" }
         part_size: { type: integer, description: "multipart: bytes por parte (la última puede ser menor)" }
         part_count: { type: integer, description: "multipart: cantidad de partes" }
         expires_at: { type: string, format: date-time }
@@ -370,6 +614,23 @@ components:
           properties:
             url: { type: string, format: uri }
             expires_at: { type: string, format: date-time }
+    WebhookEvent:
+      type: object
+      required: [id, type, data]
+      properties:
+        id: { type: string, format: uuid, description: Id del evento; deduplicar por este valor }
+        type: { type: string, enum: [file.available, file.failed, file.quarantined] }
+        data:
+          type: object
+          required: [file]
+          properties:
+            file:
+              allOf:
+                - $ref: "#/components/schemas/File"
+                - type: object
+                  description: "Sin `download`. `public_url` solo en `file.available` de un file público vivo."
+                  properties:
+                    reason: { type: string, description: "Solo en file.failed y file.quarantined" }
     Error:
       type: object
       required: [error]

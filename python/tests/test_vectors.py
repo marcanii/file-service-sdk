@@ -30,6 +30,16 @@ class WebhookVectorTest(unittest.TestCase):
         self.assertEqual(event.file.mime_type, exp["mimeType"])
         self.assertEqual(event.file.size, exp["size"])
 
+    def test_failed_expone_reason(self) -> None:
+        v = VECTORS["webhookFailed"]
+        with mock.patch("time.time", return_value=v["timestamp"] + 10):
+            event = FileService.verify_webhook(v["payload"], v["signature"], v["secret"])
+        self.assertEqual(event.type, v["expected"]["type"])
+        self.assertEqual(event.file.id, v["expected"]["fileId"])
+        self.assertEqual(event.file.status, v["expected"]["status"])
+        self.assertEqual(event.file.reason, v["expected"]["reason"])
+        self.assertIsNone(event.file.public_url)
+
     def test_ok_bytes_payload(self) -> None:
         with mock.patch("time.time", return_value=self.v["timestamp"]):
             event = FileService.verify_webhook(self.v["payload"].encode(), self.v["signature"], self.v["secret"])
@@ -95,6 +105,43 @@ class UploadTokenVectorTest(unittest.TestCase):
         for bad in ("", "abc", "1999999999", "1999999999.", "x.y", "-1.00", "1999999999.ZZ"):
             with self.subTest(bad=bad):
                 self.assertFalse(verify_upload_token(self.key, bad, c["id"], c["ownerRef"], now=0))
+
+    def test_negative_vectors_rejected(self) -> None:
+        negative = VECTORS["uploadToken"]["negative"]
+        self.assertTrue(negative)
+        for c in negative:
+            with self.subTest(case=c["name"]):
+                self.assertIs(verify_upload_token(self.key, c["token"], c["id"], c["ownerRef"], now=c["now"]), False)
+
+    def test_unicode_digits_give_403_not_500(self) -> None:
+        c = self.cases[0]
+        fs = FileService(self.key, base_url="http://127.0.0.1:1")
+        for token in ("²." + "0" * 64, "١٧٣١٣٣٦٤٠٠." + "0" * 64):
+            with self.subTest(token=token):
+                res = fs.handle_upload({"action": "complete", "id": c["id"], "token": token}, c["ownerRef"])
+                self.assertEqual(res.status, 403)
+
+
+class WebhookNegativeVectorTest(unittest.TestCase):
+    REASONS = {"missing": "falta", "malformed": "formato inválido", "mismatch": "no coincide", "expired": "viejo"}
+
+    def setUp(self) -> None:
+        self.w = VECTORS["webhook"]
+        self.n = VECTORS["webhookNegative"]
+
+    def test_rejected(self) -> None:
+        self.assertTrue(self.n["rejected"])
+        for c in self.n["rejected"]:
+            with self.subTest(case=c["name"]), mock.patch("time.time", return_value=c["now"]):
+                with self.assertRaisesRegex(WebhookSignatureError, self.REASONS[c["reason"]]):
+                    FileService.verify_webhook(self.w["payload"], c["signature"], self.w["secret"])
+
+    def test_accepted(self) -> None:
+        self.assertTrue(self.n["accepted"])
+        for c in self.n["accepted"]:
+            with self.subTest(case=c["name"]), mock.patch("time.time", return_value=c["now"]):
+                event = FileService.verify_webhook(self.w["payload"], c["signature"], self.w["secret"])
+                self.assertEqual(event.id, self.w["expected"]["id"])
 
 
 if __name__ == "__main__":

@@ -17,6 +17,7 @@ final class FileService
 {
     private const MAX_PARTS_PER_BATCH = 100;
     private const MAX_RETRY_AFTER = 60.0;
+    private const USER_AGENT = 'ntropix-file-service-php/1.2.0';
 
     private readonly string $baseUrl;
 
@@ -63,6 +64,9 @@ final class FileService
      * @param string|null          $ownerRef Id del Usuario final en tu sistema.
      * @param array<string, mixed> $metadata Datos propios del Proyecto (JSON, hasta 16 KB).
      * @param string|null          $actor    Usuario final que origina la acción (header `FS-Actor`).
+     * @param string|null          $sha256   Checksum declarado: SHA-256 del contenido, 64 hex en
+     *                                       minúscula. En subida simple el storage rechaza un
+     *                                       contenido distinto; en multipart, el file termina FAILED.
      *
      * @throws FileServiceException
      */
@@ -74,7 +78,9 @@ final class FileService
         Visibility|string|null $visibility = null,
         array $metadata = [],
         ?string $actor = null,
+        ?string $sha256 = null,
     ): CreatedUpload {
+        self::checkSha256($sha256);
         $raw = $this->request('POST', '/files', [
             'original_name' => $name,
             'mime_type' => $mimeType,
@@ -82,11 +88,12 @@ final class FileService
             'owner_ref' => $ownerRef,
             'visibility' => $visibility instanceof Visibility ? $visibility->value : $visibility,
             'metadata' => $metadata === [] ? null : $metadata,
+            'sha256' => $sha256,
         ], $actor, idempotent: false);
 
         return new CreatedUpload(
             (string) ($raw['id'] ?? ''),
-            FileStatus::tryFrom((string) ($raw['status'] ?? '')) ?? FileStatus::Pending,
+            FileStatus::tryFrom((string) ($raw['status'] ?? '')) ?? FileStatus::Unknown,
             UploadInstructions::fromApi((array) ($raw['upload'] ?? [])),
         );
     }
@@ -117,8 +124,9 @@ final class FileService
      * verificación. Es idempotente.
      *
      * @param list<array{partNumber: int, etag: string}> $parts Requerido en multipart.
-     * @param bool|float $wait `true` espera hasta 30 s a que quede `AVAILABLE`; un float es el
-     *        máximo en segundos. Si el file termina rechazado lanza `FileRejectedException`.
+     * @param bool|float $wait `false`, `0` o un valor negativo: no espera (devuelve el file en READY).
+     *        `true` espera hasta 30 s a que quede `AVAILABLE`; un float positivo es el máximo en
+     *        segundos. Si el file termina rechazado lanza `FileRejectedException`.
      *
      * @throws FileServiceException
      */
@@ -133,7 +141,7 @@ final class FileService
         }
         $raw = $this->request('POST', '/files/' . rawurlencode($id) . '/complete', $body, $actor);
         $file = FileInfo::fromApi($raw ?? []);
-        if ($wait === false) {
+        if ($wait === false || ($wait !== true && $wait <= 0)) {
             return $file;
         }
 
@@ -153,6 +161,10 @@ final class FileService
      * @param int|null   $size Obligatorio solo si `$data` es un stream sin tamaño conocido.
      * @param bool|float $wait Igual que en `complete()` (default: esperar hasta 30 s).
      * @param array<string, mixed> $metadata
+     * @param string|null $sha256 Checksum declarado (64 hex en minúscula). Si falta, se calcula
+     *        leyendo por bloques cuando `$data` se puede releer (string, archivo, stream con seek); un
+     *        stream sin seek no se hashea. En subida simple, un contenido distinto falla con
+     *        `checksum_mismatch`; en multipart el file termina FAILED.
      *
      * @throws FileServiceException
      */
@@ -166,7 +178,9 @@ final class FileService
         array $metadata = [],
         bool|float $wait = true,
         ?string $actor = null,
+        ?string $sha256 = null,
     ): FileInfo {
+        self::checkSha256($sha256);
         $ownStream = false;
         if ($data instanceof \SplFileInfo) {
             $path = $data->getPathname();
@@ -183,7 +197,8 @@ final class FileService
 
         try {
             $size ??= is_string($data) ? strlen($data) : self::streamSize($data);
-            $created = $this->createUpload($name, $mimeType, $size, $ownerRef, $visibility, $metadata, $actor);
+            $sha256 ??= self::sha256Of($data, $size);
+            $created = $this->createUpload($name, $mimeType, $size, $ownerRef, $visibility, $metadata, $actor, $sha256);
             $up = $created->upload;
             $parts = [];
 
@@ -320,6 +335,17 @@ final class FileService
     }
 
     /**
+     * Uso del Proyecto contra su Cuota y límites de su Política. Sirve con una key de solo lectura;
+     * consultarlo antes de iniciar una subida evita un `quota_exceeded`.
+     *
+     * @throws FileServiceException
+     */
+    public function usage(?string $actor = null): Usage
+    {
+        return Usage::fromApi($this->request('GET', '/usage', null, $actor) ?? []);
+    }
+
+    /**
      * Recorre todas las páginas de `list()`.
      *
      * @return \Generator<int, FileInfo>
@@ -364,6 +390,7 @@ final class FileService
 
     /**
      * Manda el file a la papelera. Se recupera con `restore()` durante la retención del Proyecto.
+     * Sobre una subida en curso (sin completar), la cancela: ya no se puede restaurar ni completar.
      *
      * @throws FileServiceException
      */
@@ -373,7 +400,21 @@ final class FileService
     }
 
     /**
-     * Recupera un file de la papelera.
+     * Purga anticipada: borra el file en el acto y sin vuelta atrás, esté o no en la papelera (p. ej.
+     * un pedido de borrado de datos personales). No se lista, no se restaura, no se descarga y su URL
+     * pública deja de responder. Si otro file del Proyecto comparte el contenido, ese contenido
+     * sigue; si no, el servicio lo borra en su ciclo de limpieza. Una subida en curso →
+     * `invalid_state` (usá `delete()`); inexistente o ya purgado → `not_found`.
+     *
+     * @throws FileServiceException
+     */
+    public function purge(string $id, ?string $actor = null): void
+    {
+        $this->request('POST', '/files/' . rawurlencode($id) . '/purge', null, $actor);
+    }
+
+    /**
+     * Recupera un file de la papelera. Una subida cancelada no se restaura: `invalid_state`.
      *
      * @throws FileServiceException
      */
@@ -407,29 +448,40 @@ final class FileService
         if ($signature === null || $signature === '') {
             throw new WebhookSignatureException('falta el header FS-Signature');
         }
-        $fields = [];
+        $t = null;
+        $candidates = [];
         foreach (explode(',', $signature) as $kv) {
             $pair = explode('=', trim($kv), 2);
-            if (count($pair) === 2) {
-                $fields[$pair[0]] = $pair[1];
+            if (count($pair) !== 2) {
+                continue;
+            }
+            if ($pair[0] === 't') {
+                if ($t !== null) {
+                    throw new WebhookSignatureException('FS-Signature con formato inválido');
+                }
+                $t = $pair[1];
+            } elseif ($pair[0] === 'v1' && preg_match('/^[0-9a-f]{64}$/D', $pair[1]) === 1) {
+                $candidates[] = $pair[1];
             }
         }
-        $t = $fields['t'] ?? '';
-        $v1 = strtolower($fields['v1'] ?? '');
-        if (preg_match('/^[0-9]{1,19}$/D', $t) !== 1 || $v1 === '') {
+        if ($t === null || preg_match('/^[1-9][0-9]{0,11}$/D', $t) !== 1 || $candidates === []) {
             throw new WebhookSignatureException('FS-Signature con formato inválido');
         }
 
         $expected = hash_hmac('sha256', "{$t}.{$payload}", $secret);
-        if (!hash_equals($expected, $v1)) {
+        $match = false;
+        foreach ($candidates as $v1) {
+            $match = hash_equals($expected, $v1) || $match;
+        }
+        if (!$match) {
             throw new WebhookSignatureException('la firma del webhook no coincide');
         }
         if (abs(($now ?? time()) - (int) $t) > $tolerance) {
             throw new WebhookSignatureException('el evento es demasiado viejo');
         }
 
-        $raw = json_decode($payload, true);
-        if (!is_array($raw) || !is_array($raw['data']['file'] ?? null)) {
+        $raw = Json::decode($payload);
+        if (!is_array($raw) || !is_array($raw['data'] ?? null) || !is_array($raw['data']['file'] ?? null)) {
             throw new WebhookSignatureException('payload del webhook inválido');
         }
 
@@ -473,7 +525,7 @@ final class FileService
                 return UploadResult::error(401, 'unauthorized', 'falta el usuario autenticado (ownerRef)');
             }
             if (is_string($body)) {
-                $body = json_decode($body, true);
+                $body = Json::decode($body);
             }
             if (!is_array($body) || ($body !== [] && array_is_list($body))) {
                 return UploadResult::error(400, 'validation', 'body JSON inválido');
@@ -525,6 +577,10 @@ final class FileService
         ) {
             return UploadResult::error(400, 'validation', 'create requiere name, mimeType y size');
         }
+        $sha256 = $b['sha256'] ?? null;
+        if ($sha256 !== null && (!is_string($sha256) || !self::isDeclaredSha256($sha256))) {
+            return UploadResult::error(400, 'validation', 'sha256 debe ser 64 hex en minúscula');
+        }
         $clientMeta = $b['metadata'] ?? [];
         if (!is_array($clientMeta) || ($clientMeta !== [] && array_is_list($clientMeta))) {
             $clientMeta = [];
@@ -538,6 +594,7 @@ final class FileService
             visibility: $visibility,
             metadata: $metadata + $clientMeta,
             actor: $ownerRef,
+            sha256: $sha256,
         );
         $token = UploadToken::sign($this->apiKey, $created->id, $ownerRef, ($this->clock)() + UploadToken::TTL);
 
@@ -655,7 +712,7 @@ final class FileService
         ?string $actor,
         bool $idempotent = true,
     ): ?array {
-        $headers = ['Authorization: Bearer ' . $this->apiKey, 'Accept: application/json'];
+        $headers = ['Authorization: Bearer ' . $this->apiKey, 'Accept: application/json', 'User-Agent: ' . self::USER_AGENT];
         if ($actor !== null && $actor !== '') {
             $headers[] = 'FS-Actor: ' . str_replace(["\r", "\n"], '', $actor);
         }
@@ -670,13 +727,14 @@ final class FileService
         }
 
         // Solo se reintenta lo que es seguro repetir: crear un file dos veces dejaría uno huérfano.
-        $attempts = $idempotent ? $this->retries + 1 : 1;
+        // Un 429 se rechaza antes de procesar: es seguro repetirlo incluso al crear.
+        $attempts = $this->retries + 1;
         for ($attempt = 1;; $attempt++) {
             $delay = 0.25 * 2 ** ($attempt - 1);
             try {
                 $res = $this->send($method, $this->baseUrl . $path, $headers, $payload);
             } catch (FileServiceException $e) {
-                if ($attempt >= $attempts) {
+                if (!$idempotent || $attempt >= $attempts) {
                     throw $e;
                 }
                 usleep((int) ($delay * 1_000_000));
@@ -687,7 +745,7 @@ final class FileService
             if ($status === 204) {
                 return null;
             }
-            $json = $res['body'] === '' ? null : json_decode($res['body'], true);
+            $json = $res['body'] === '' ? null : Json::decode($res['body']);
             if ($status >= 200 && $status < 300) {
                 return is_array($json) ? $json : null;
             }
@@ -701,7 +759,7 @@ final class FileService
                     : "respuesta inesperada del File Service (HTTP {$status})",
                 requestId: ($res['headers']['x-request-id'] ?? '') !== '' ? $res['headers']['x-request-id'] : null,
             );
-            if (($status !== 429 && $status < 500) || $attempt >= $attempts) {
+            if (!($status === 429 || ($idempotent && $status >= 500)) || $attempt >= $attempts) {
                 throw $e;
             }
             $retryAfter = self::parseRetryAfter($res['headers']['retry-after'] ?? null);
@@ -747,6 +805,15 @@ final class FileService
             }
             if ($res['status'] >= 200 && $res['status'] < 300) {
                 return trim($res['headers']['etag'] ?? '', '"');
+            }
+            if ($res['status'] === 412 && $attempt > 1) {
+                // Subida simple de escritura única (If-None-Match: *): el intento anterior escribió y se
+                // perdió su respuesta. El objeto ya es el nuestro.
+                return '';
+            }
+            if ($res['status'] === 400 && array_key_exists('x-amz-checksum-sha256', array_change_key_case($headers))) {
+                // Con el Checksum declarado firmado en el PUT, un 400 es contenido distinto del declarado.
+                throw new FileServiceException(400, 'checksum_mismatch', 'el contenido no coincide con su SHA-256 declarado');
             }
             if ($res['status'] < 500 || $attempt >= $attempts) {
                 throw new FileServiceException(
@@ -861,6 +928,48 @@ final class FileService
         }
 
         return $secs > 0 ? min($secs, self::MAX_RETRY_AFTER) : null;
+    }
+
+    /** Checksum declarado: 64 hex en minúscula, el mismo formato que `contentHash`. */
+    private static function isDeclaredSha256(string $sha256): bool
+    {
+        return preg_match('/^[0-9a-f]{64}$/D', $sha256) === 1;
+    }
+
+    private static function checkSha256(?string $sha256): void
+    {
+        if ($sha256 !== null && !self::isDeclaredSha256($sha256)) {
+            throw new FileServiceException(0, 'validation', 'sha256 debe ser 64 hex en minúscula');
+        }
+    }
+
+    /**
+     * SHA-256 de `$size` bytes desde la posición actual, leyendo por bloques; deja el stream donde
+     * estaba. Un stream sin seek no se puede releer: devuelve null (no se declara nada).
+     *
+     * @param string|resource $data
+     */
+    private static function sha256Of(mixed $data, int $size): ?string
+    {
+        if (is_string($data)) {
+            return hash('sha256', $data);
+        }
+        $start = ftell($data);
+        if ($start === false || !(stream_get_meta_data($data)['seekable'] ?? false)) {
+            return null;
+        }
+        $ctx = hash_init('sha256');
+        for ($left = $size; $left > 0;) {
+            $chunk = fread($data, min($left, 1 << 20));
+            if ($chunk === false || $chunk === '') {
+                break; // el stream terminó antes: lo detecta el PUT con el tamaño firmado
+            }
+            hash_update($ctx, $chunk);
+            $left -= strlen($chunk);
+        }
+        fseek($data, $start);
+
+        return hash_final($ctx);
     }
 
     /**

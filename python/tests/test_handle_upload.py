@@ -1,5 +1,6 @@
 """`handle_upload` y el cliente HTTP contra un File Service falso local (sin red real)."""
 
+import io
 import json
 import sys
 import threading
@@ -16,6 +17,7 @@ from ntropix_file_service import FileService, FileServiceError  # noqa: E402
 from ntropix_file_service._token import create_upload_token  # noqa: E402
 
 API_KEY = "fsk_test_unit"
+VECTORS = json.loads((ROOT.parent / "testdata" / "vectors.json").read_text("utf-8"))
 FILE_ID = "0193a1c7-2f00-7000-8000-0000000000aa"
 
 
@@ -39,6 +41,16 @@ def api_file(status: str = "READY", **extra: Any) -> Dict[str, Any]:
 Response = Tuple[int, Any, Dict[str, str]]
 
 
+def _json_or_raw(raw: bytes) -> Any:
+    """Body JSON de la API, o los bytes crudos de un PUT al storage."""
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return raw
+
+
 class FakeAPI:
     """Servidor HTTP en un thread: responde con una cola de respuestas y guarda los requests."""
 
@@ -59,7 +71,7 @@ class FakeAPI:
                         "method": self.command,
                         "path": self.path,
                         "headers": {k.lower(): v for k, v in self.headers.items()},
-                        "body": json.loads(raw) if raw else None,
+                        "body": _json_or_raw(raw),
                     }
                 )
                 status, body, headers = fake.queue.pop(0) if fake.queue else (500, {"error": {"code": "internal", "message": "cola vacía"}}, {})
@@ -155,6 +167,27 @@ class HandleUploadTest(unittest.TestCase):
                 "metadata": {"album": "x", "k": "backend"},
             },
         )
+
+    def test_create_pasa_el_sha256_declarado(self) -> None:
+        sha = VECTORS["declaredChecksum"]["sha256"]
+        for extra in ({"sha256": sha}, {}, {"sha256": None}):
+            with self.subTest(extra=extra):
+                self.api.requests.clear()
+                self.api.reply(201, {"id": FILE_ID, "status": "PENDING", "upload": {"mode": "simple", "url": "u", "headers": {}, "expires_at": "e"}})
+                r = self.fs.handle_upload({"action": "create", "name": "a.txt", "mimeType": "text/plain", "size": 18, **extra}, owner_ref="u")
+                self.assertEqual(r.status, 200, r.body)
+                body = self.api.requests[0]["body"]
+                if extra.get("sha256"):
+                    self.assertEqual(body["sha256"], sha)
+                else:
+                    self.assertNotIn("sha256", body)
+
+    def test_create_sha256_invalido_400_sin_llamar_a_la_api(self) -> None:
+        for case in VECTORS["declaredChecksum"]["invalid"]:
+            with self.subTest(name=case["name"]):
+                r = self.fs.handle_upload({"action": "create", "name": "a", "mimeType": "x/y", "size": 1, "sha256": case["value"]}, owner_ref="u")
+                self.assertEqual((r.status, r.body["error"]["code"]), (400, "validation"))
+        self.assertEqual(self.api.requests, [])
 
     def test_create_multipart_instructions_camel_case(self) -> None:
         self.api.reply(201, {"id": FILE_ID, "status": "PENDING", "upload": {"mode": "multipart", "part_size": 8388608, "part_count": 5, "expires_at": "e"}})
@@ -319,11 +352,141 @@ class ClientTest(unittest.TestCase):
         self.assertIsNone(self.fs.delete(FILE_ID))
         self.assertEqual(self.api.requests[3]["method"], "DELETE")
 
+    def test_purge(self) -> None:
+        self.api.reply(204)
+        self.assertIsNone(self.fs.purge(FILE_ID, actor="user_9"))
+        req = self.api.requests[0]
+        self.assertEqual((req["method"], req["path"], req["headers"]["fs-actor"]), ("POST", f"/files/{FILE_ID}/purge", "user_9"))
+        self.api.reply(409, {"error": {"code": "invalid_state", "message": "subida en curso"}})
+        with self.assertRaises(FileServiceError) as ctx:
+            self.fs.purge(FILE_ID)
+        self.assertEqual((ctx.exception.status, ctx.exception.code), (409, "invalid_state"))
+
+    def test_put_412_on_retry_is_success(self) -> None:
+        # Escritura única (If-None-Match: *): el 1.er PUT escribió pero su respuesta se perdió (503 acá);
+        # el reintento recibe 412 y eso cuenta como subido.
+        fs = FileService(api_key=API_KEY, base_url=self.api.url, timeout=5, retries=2)
+        fs._sleep = lambda s: None
+        self.api.reply(503)
+        self.api.reply(412)
+        body = b'"x"'
+        self.assertEqual(fs._put(self.api.url + "/storage/0", lambda: io.BytesIO(body), len(body), {"If-None-Match": "*"}), "")
+        self.assertEqual(len(self.api.requests), 2)
+
+    def test_put_412_on_first_attempt_is_error(self) -> None:
+        self.api.reply(412)
+        body = b'"x"'
+        with self.assertRaises(FileServiceError) as ctx:
+            self.fs._put(self.api.url + "/storage/0", lambda: io.BytesIO(body), len(body), {"If-None-Match": "*"})
+        self.assertEqual(ctx.exception.status, 412)
+
     def test_get_download_url_not_available(self) -> None:
         self.api.reply(200, api_file("READY"))
         with self.assertRaises(FileServiceError) as ctx:
             self.fs.get_download_url(FILE_ID)
         self.assertEqual(ctx.exception.code, "invalid_state")
+
+
+class DeclaredChecksumUploadTest(unittest.TestCase):
+    """Checksum declarado en upload() / create_upload() (sdk/PROTOCOL.md)."""
+
+    CONTENT = VECTORS["declaredChecksum"]["content"].encode()
+    SHA = VECTORS["declaredChecksum"]["sha256"]
+
+    def setUp(self) -> None:
+        self.api = FakeAPI()
+        self.fs = FileService(api_key=API_KEY, base_url=self.api.url, timeout=5, retries=0)
+        self.fs._sleep = lambda s: None
+
+    def tearDown(self) -> None:
+        self.api.close()
+
+    def simple_flow(self, put_status: int = 200, checksum: bool = True) -> None:
+        headers = {"x-amz-checksum-sha256": "x"} if checksum else {}
+        self.api.reply(201, {"id": FILE_ID, "status": "PENDING", "upload": {"mode": "simple", "url": self.api.url + "/storage/0", "headers": headers, "expires_at": "e"}})
+        self.api.reply(put_status, None, {"ETag": '"e"'})
+        self.api.reply(200, api_file("READY"))
+
+    def create_body(self) -> Dict[str, Any]:
+        return self.api.requests[0]["body"]
+
+    def test_bytes_ruta_y_archivo_con_seek_calculan_el_sha256(self) -> None:
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(delete=False) as tmp:
+            tmp.write(b"prefijo" + self.CONTENT)
+        self.addCleanup(lambda: Path(tmp.name).unlink())
+        con_offset = open(tmp.name, "rb")
+        self.addCleanup(con_offset.close)
+        con_offset.seek(len(b"prefijo"))
+        cases = [("bytes", self.CONTENT), ("archivo con seek (desde su posición)", con_offset)]
+        for name, data in cases:
+            with self.subTest(name):
+                self.api.requests.clear()
+                self.simple_flow()
+                self.fs.upload("a.txt", "text/plain", data, wait=False)
+                self.assertEqual(self.create_body()["sha256"], self.SHA)
+                self.assertEqual((self.api.requests[1]["method"], self.api.requests[1]["body"]), ("PUT", self.CONTENT))
+        with tempfile.NamedTemporaryFile(delete=False) as only:
+            only.write(self.CONTENT)
+        self.addCleanup(lambda: Path(only.name).unlink())
+        self.api.requests.clear()
+        self.simple_flow()
+        self.fs.upload("a.txt", "text/plain", only.name, wait=False)
+        self.assertEqual(self.create_body()["sha256"], self.SHA)
+
+    def test_stream_sin_seek_no_calcula_nada_salvo_sha256_explicito(self) -> None:
+        class OneShot(io.RawIOBase):
+            def __init__(self, data: bytes) -> None:
+                self.inner = io.BytesIO(data)
+
+            def readable(self) -> bool:
+                return True
+
+            def seekable(self) -> bool:
+                return False
+
+            def readinto(self, b: Any) -> int:
+                return self.inner.readinto(b)
+
+        self.simple_flow(checksum=False)
+        self.fs.upload("a.txt", "text/plain", OneShot(self.CONTENT), wait=False)
+        self.assertNotIn("sha256", self.create_body())
+
+        self.api.requests.clear()
+        self.simple_flow()
+        self.fs.upload("a.txt", "text/plain", OneShot(self.CONTENT), sha256=self.SHA, wait=False)
+        self.assertEqual(self.create_body()["sha256"], self.SHA)
+
+    def test_sha256_explicito_no_se_recalcula(self) -> None:
+        otro = "0" * 64
+        self.simple_flow()
+        self.fs.upload("a.txt", "text/plain", self.CONTENT, sha256=otro, wait=False)
+        self.assertEqual(self.create_body()["sha256"], otro)
+
+    def test_sha256_invalido_validation_sin_llamar_a_la_api(self) -> None:
+        for case in VECTORS["declaredChecksum"]["invalid"]:
+            with self.subTest(case["name"]):
+                for call in (
+                    lambda v=case["value"]: self.fs.create_upload("a", "x/y", 1, sha256=v),
+                    lambda v=case["value"]: self.fs.upload("a", "x/y", b"a", sha256=v),
+                ):
+                    with self.assertRaises(FileServiceError) as ctx:
+                        call()
+                    self.assertEqual(ctx.exception.code, "validation")
+        self.assertEqual(self.api.requests, [])
+
+    def test_rechazo_del_storage_por_checksum_es_checksum_mismatch(self) -> None:
+        self.simple_flow(put_status=400)
+        with self.assertRaises(FileServiceError) as ctx:
+            self.fs.upload("a.txt", "text/plain", self.CONTENT, wait=False)
+        self.assertEqual((ctx.exception.status, ctx.exception.code), (400, "checksum_mismatch"))
+
+        self.api.queue.clear()
+        self.simple_flow(put_status=400, checksum=False)
+        with self.assertRaises(FileServiceError) as ctx:
+            self.fs.upload("a.txt", "text/plain", self.CONTENT, wait=False)
+        self.assertEqual(ctx.exception.code, "storage_rejected", "sin checksum firmado, un 400 es otro rechazo")
 
 
 if __name__ == "__main__":

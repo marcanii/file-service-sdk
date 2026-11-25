@@ -15,7 +15,7 @@ class FileServiceError(Exception):
     `status` es el HTTP (0 si no hubo respuesta). Códigos: `unauthorized` · `forbidden` ·
     `project_disabled` · `not_found` · `validation` · `invalid_state` · `no_bytes` · `too_large` ·
     `type_not_allowed` · `quota_exceeded` · `storage_full` · `rate_limited` · `internal` ·
-    `storage_rejected` · `network` · `timeout`.
+    `storage_rejected` · `checksum_mismatch` · `network` · `timeout`.
 
     `request_id` es el `X-Request-ID` de la respuesta: incluilo al reportar un problema. `None` si
     no hubo respuesta del File Service (`network`, `timeout`).

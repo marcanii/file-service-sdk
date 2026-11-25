@@ -35,6 +35,7 @@ func VerifyWebhook(payload []byte, signature, secret string, tolerance time.Dura
 		return nil, ErrMissingSignature
 	}
 	var ts string
+	var tSeen bool
 	var given [][]byte
 	for _, field := range strings.Split(signature, ",") {
 		k, v, ok := strings.Cut(strings.TrimSpace(field), "=")
@@ -43,15 +44,26 @@ func VerifyWebhook(payload []byte, signature, secret string, tolerance time.Dura
 		}
 		switch k {
 		case "t":
-			ts = v
-		case "v1":
-			if b, err := hex.DecodeString(v); err == nil {
-				given = append(given, b)
+			if tSeen {
+				return nil, ErrMalformedSignature
 			}
+			tSeen, ts = true, v
+		case "v1":
+			if !isLowerHex(v, sha256.Size*2) {
+				continue
+			}
+			b, err := hex.DecodeString(v)
+			if err != nil {
+				continue
+			}
+			given = append(given, b)
 		}
 	}
+	if !isCanonicalUnix(ts) || len(given) == 0 {
+		return nil, ErrMalformedSignature
+	}
 	t, err := strconv.ParseInt(ts, 10, 64)
-	if err != nil || len(given) == 0 {
+	if err != nil {
 		return nil, ErrMalformedSignature
 	}
 
@@ -91,4 +103,31 @@ func VerifyWebhook(payload []byte, signature, secret string, tolerance time.Dura
 		ev.File = raw.Data.File.toFile()
 	}
 	return ev, nil
+}
+
+// isCanonicalUnix reporta si s es un timestamp Unix canónico (sdk/PROTOCOL.md): 1 a 12 dígitos
+// ASCII, sin signo, sin ceros a la izquierda ni espacios.
+func isCanonicalUnix(s string) bool {
+	if len(s) == 0 || len(s) > 12 || s[0] < '1' || s[0] > '9' {
+		return false
+	}
+	for i := 1; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// isLowerHex reporta si s son exactamente n caracteres hex en minúscula.
+func isLowerHex(s string, n int) bool {
+	if len(s) != n {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }

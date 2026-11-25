@@ -13,7 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from ntropix_file_service import FileService, FileServiceError  # noqa: E402
+from ntropix_file_service import FileRejectedError, FileService, FileServiceError  # noqa: E402
 
 KEY = os.environ.get("FS_KEY")
 if not KEY:
@@ -104,6 +104,13 @@ with tempfile.TemporaryDirectory() as tmp:
     fs.sign_parts = lambda id, nums, **kw: signed.extend(nums) or original_sign_parts(id, nums, **kw)  # type: ignore
     big = fs.upload("grande.bin", "application/octet-stream", path, owner_ref="user_py", wait=120)
     del fs.sign_parts
+    # Checksum declarado incorrecto en multipart: el storage no lo ve; lo rechaza la verificación.
+    try:
+        fs.upload("mal.bin", "application/octet-stream", path, sha256=hashlib.sha256(b"otro").hexdigest(), wait=120)
+        raise AssertionError("un sha256 incorrecto en multipart debería terminar FAILED")
+    except FileRejectedError as e:
+        assert e.code == "failed" and e.file.status == "FAILED", e
+    step("upload() multipart con sha256 incorrecto → FAILED (FileRejectedError)")
 assert big.status == "AVAILABLE", big
 assert len(signed) >= 2, signed
 assert big.size == 40 << 20 and big.content_hash == h.hexdigest()
@@ -113,12 +120,23 @@ small = fs.upload("reporte.pdf", "application/pdf", b"%PDF-1.7\nreporte " + os.u
 assert small.status == "AVAILABLE" and small.mime_type == "application/pdf", small
 step("upload() simple de bytes → AVAILABLE")
 
+try:
+    fs.upload("mal.txt", "text/plain", b"hola checksum\n", sha256=hashlib.sha256(b"otro").hexdigest())
+    raise AssertionError("un sha256 incorrecto en simple debería fallar")
+except FileServiceError as e:
+    assert (e.status, e.code) == (400, "checksum_mismatch"), e
+step("upload() simple con sha256 incorrecto → checksum_mismatch")
+
 # (d) get / list / update public / delete / restore.
 fid = created["id"]
 f = fs.get(fid, actor="user_py")
 assert f.download is not None and fetch(f.download.url) == text
 assert fetch(fs.get_download_url(fid)) == text
 step("get + get_download_url entregan los mismos bytes")
+
+u = fs.usage()
+assert u.used_bytes > 0 and u.file_count >= 1 and u.max_file_size > 0 and isinstance(u.allowed_mime_types, list), u
+step("usage() devuelve el uso y los límites del Proyecto")
 
 page = fs.list(owner_ref="user_py", limit=1)
 assert len(page.files) == 1 and page.next_cursor
@@ -144,6 +162,16 @@ assert any(x.id == fid for x in fs.iter_all(trashed=True, owner_ref="user_py"))
 restored = fs.restore(fid)
 assert restored.deleted_at is None
 step("delete → papelera → restore")
+
+doomed = fs.upload("purgar.txt", "text/plain", b"purgar " + os.urandom(8).hex().encode() + b"\n", owner_ref="user_py")
+fs.purge(doomed.id, actor="user_py")
+for call in (lambda: fs.get(doomed.id), lambda: fs.restore(doomed.id), lambda: fs.purge(doomed.id)):
+    try:
+        call()
+        raise AssertionError("un file purgado no existe más")
+    except FileServiceError as e:
+        assert e.code == "not_found", e
+step("purge() borra en el acto, sin restore; purgar de nuevo → not_found")
 
 try:
     fs.get("00000000-0000-7000-8000-000000000000")

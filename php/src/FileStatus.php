@@ -15,6 +15,8 @@ enum FileStatus: string
     case Available = 'AVAILABLE';
     case Failed = 'FAILED';
     case Quarantined = 'QUARANTINED';
+    /** Estado que este SDK no conoce (el servicio agregó uno nuevo): no es final ni descargable. */
+    case Unknown = 'UNKNOWN';
 
     /** `true` si el worker ya terminó de verificar el file (aceptado o rechazado). */
     public function isFinal(): bool

@@ -17,7 +17,9 @@ jobs:
         with: { node-version: 22 }
       - run: pnpm install --frozen-lockfile && pnpm build && pnpm test
       # El paquete debe resolver bien con import y require, en todos los modos de TypeScript.
-      - run: npm pack && npx -y @arethetypeswrong/cli@0.18.5 ntropix-file-service-*.tgz
+      - run: |
+          f=$(npm pack --silent | tail -1)
+          npx -y @arethetypeswrong/cli@0.18.5 "$f"
 
   python:
     runs-on: ubuntu-24.04   # ubuntu-latest (26.04) ya no ofrece Python 3.9 en setup-python

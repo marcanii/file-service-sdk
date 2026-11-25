@@ -1,8 +1,10 @@
 package fileservice
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"os"
 	"testing"
 	"time"
@@ -24,6 +26,31 @@ type vectors struct {
 			Size     int64  `json:"size"`
 		} `json:"expected"`
 	} `json:"webhook"`
+	WebhookFailed struct {
+		Secret    string `json:"secret"`
+		Timestamp int64  `json:"timestamp"`
+		Payload   string `json:"payload"`
+		Signature string `json:"signature"`
+		Expected  struct {
+			Type   string `json:"type"`
+			FileID string `json:"fileId"`
+			Status string `json:"status"`
+			Reason string `json:"reason"`
+		} `json:"expected"`
+	} `json:"webhookFailed"`
+	WebhookNegative struct {
+		Rejected []struct {
+			Name      string `json:"name"`
+			Signature string `json:"signature"`
+			Now       int64  `json:"now"`
+			Reason    string `json:"reason"`
+		} `json:"rejected"`
+		Accepted []struct {
+			Name      string `json:"name"`
+			Signature string `json:"signature"`
+			Now       int64  `json:"now"`
+		} `json:"accepted"`
+	} `json:"webhookNegative"`
 	UploadToken struct {
 		APIKey string `json:"apiKey"`
 		Cases  []struct {
@@ -32,7 +59,22 @@ type vectors struct {
 			Exp      int64  `json:"exp"`
 			Token    string `json:"token"`
 		} `json:"cases"`
+		Negative []struct {
+			Name     string `json:"name"`
+			ID       string `json:"id"`
+			OwnerRef string `json:"ownerRef"`
+			Now      int64  `json:"now"`
+			Token    string `json:"token"`
+		} `json:"negative"`
 	} `json:"uploadToken"`
+	DeclaredChecksum struct {
+		Content string `json:"content"`
+		SHA256  string `json:"sha256"`
+		Invalid []struct {
+			Name  string          `json:"name"`
+			Value json.RawMessage `json:"value"`
+		} `json:"invalid"`
+	} `json:"declaredChecksum"`
 }
 
 func loadVectors(t *testing.T) vectors {
@@ -142,6 +184,103 @@ func TestUploadTokenVectors(t *testing.T) {
 	for _, bad := range []string{"", "nodot", "abc.def", "1999999999.zz"} {
 		if verifyUploadToken(v.APIKey, bad, "x", "y", time.Unix(0, 0)) {
 			t.Errorf("token malformado aceptado: %q", bad)
+		}
+	}
+}
+
+func TestWebhookVector_FailedExponeReason(t *testing.T) {
+	v := loadVectors(t).WebhookFailed
+	withClock(t, time.Unix(v.Timestamp+10, 0))
+
+	ev, err := VerifyWebhook([]byte(v.Payload), v.Signature, v.Secret, 0)
+	if err != nil {
+		t.Fatalf("VerifyWebhook: %v", err)
+	}
+	f := ev.File
+	if string(ev.Type) != v.Expected.Type || f == nil || f.ID != v.Expected.FileID ||
+		string(f.Status) != v.Expected.Status || f.Reason != v.Expected.Reason || f.PublicURL != "" {
+		t.Errorf("evento = %+v, file = %+v; esperado %+v", ev, f, v.Expected)
+	}
+}
+
+func TestUploadTokenVectors_Negative(t *testing.T) {
+	v := loadVectors(t).UploadToken
+	if len(v.Negative) == 0 {
+		t.Fatal("sin vectores negativos")
+	}
+	for _, tc := range v.Negative {
+		if verifyUploadToken(v.APIKey, tc.Token, tc.ID, tc.OwnerRef, time.Unix(tc.Now, 0)) {
+			t.Errorf("%s: token aceptado: %q", tc.Name, tc.Token)
+		}
+	}
+}
+
+func TestWebhookVectors_Negative(t *testing.T) {
+	all := loadVectors(t)
+	w, n := all.Webhook, all.WebhookNegative
+	if len(n.Rejected) == 0 || len(n.Accepted) == 0 {
+		t.Fatal("sin vectores negativos")
+	}
+	want := map[string]error{
+		"missing":   ErrMissingSignature,
+		"malformed": ErrMalformedSignature,
+		"mismatch":  ErrSignatureMismatch,
+		"expired":   ErrSignatureExpired,
+	}
+	for _, tc := range n.Rejected {
+		withClock(t, time.Unix(tc.Now, 0))
+		_, err := VerifyWebhook([]byte(w.Payload), tc.Signature, w.Secret, 0)
+		if !errors.Is(err, want[tc.Reason]) {
+			t.Errorf("%s: err = %v, esperado %v", tc.Name, err, want[tc.Reason])
+		}
+	}
+	for _, tc := range n.Accepted {
+		withClock(t, time.Unix(tc.Now, 0))
+		ev, err := VerifyWebhook([]byte(w.Payload), tc.Signature, w.Secret, 0)
+		if err != nil || ev.ID != w.Expected.ID {
+			t.Errorf("%s: ev = %+v, err = %v", tc.Name, ev, err)
+		}
+	}
+}
+
+// El sha256 de create (Checksum declarado) válido llega a POST /files; ausente o null no se manda.
+func TestVectors_DeclaredChecksumPasaALaAPI(t *testing.T) {
+	v := loadVectors(t)
+	var bodies []map[string]any
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var b map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&b)
+		bodies = append(bodies, b)
+		writeJSON(w, 201, map[string]any{"id": "f1", "status": "PENDING",
+			"upload": map[string]any{"mode": "simple", "url": "u", "headers": map[string]string{}, "expires_at": "2026-11-10T13:00:00Z"}})
+	}))
+	base := `{"action":"create","name":"a.txt","mimeType":"text/plain","size":18`
+	for _, body := range []string{base + `,"sha256":"` + v.DeclaredChecksum.SHA256 + `"}`, base + `}`, base + `,"sha256":null}`} {
+		if res := c.HandleUpload(context.Background(), []byte(body), HandleOptions{OwnerRef: "u"}); res.Status != 200 {
+			t.Fatalf("%s → %d %+v", body, res.Status, res.Body)
+		}
+	}
+	if bodies[0]["sha256"] != v.DeclaredChecksum.SHA256 {
+		t.Errorf("sha256 enviado = %v", bodies[0]["sha256"])
+	}
+	for _, b := range bodies[1:] {
+		if _, ok := b["sha256"]; ok {
+			t.Errorf("sin sha256 no debe mandarse: %v", b)
+		}
+	}
+}
+
+// Un sha256 inválido se rechaza con 400 validation sin llamar a la API.
+func TestVectors_DeclaredChecksumInvalido(t *testing.T) {
+	v := loadVectors(t)
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("no debe llamar a la API: %s %s", r.Method, r.URL.Path)
+	}))
+	for _, tc := range v.DeclaredChecksum.Invalid {
+		body := `{"action":"create","name":"a","mimeType":"x/y","size":1,"sha256":` + string(tc.Value) + `}`
+		res := c.HandleUpload(context.Background(), []byte(body), HandleOptions{OwnerRef: "u"})
+		if res.Status != 400 || errorOf(t, res).Code != CodeValidation {
+			t.Errorf("%s → %d %+v", tc.Name, res.Status, res.Body)
 		}
 	}
 }

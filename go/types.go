@@ -68,6 +68,8 @@ type File struct {
 	DeletedAt *time.Time `json:"deletedAt,omitempty"`
 	// Download es una URL firmada de vida corta. Solo viene en Get y si el archivo está disponible.
 	Download *Download `json:"download,omitempty"`
+	// Reason es el motivo del fallo o la cuarentena. Solo viene en los Eventos file.failed y file.quarantined.
+	Reason string `json:"reason,omitempty"`
 }
 
 // Download es una URL firmada de descarga.
@@ -138,6 +140,7 @@ type wireFile struct {
 		URL       string    `json:"url"`
 		ExpiresAt time.Time `json:"expires_at"`
 	} `json:"download"`
+	Reason string `json:"reason"`
 }
 
 func (w *wireFile) toFile() *File {
@@ -155,6 +158,7 @@ func (w *wireFile) toFile() *File {
 		Metadata:    w.Metadata,
 		CreatedAt:   w.CreatedAt,
 		DeletedAt:   w.DeletedAt,
+		Reason:      w.Reason,
 	}
 	if f.Metadata == nil {
 		f.Metadata = map[string]any{}
@@ -183,4 +187,18 @@ func (w wireUpload) toInstructions() UploadInstructions {
 		PartCount: w.PartCount,
 		ExpiresAt: w.ExpiresAt,
 	}
+}
+
+// Usage es el uso del Proyecto contra su Cuota y los límites de su Política.
+type Usage struct {
+	// UsedBytes son los bytes ocupados por el Proyecto (incluye subidas en curso).
+	UsedBytes int64 `json:"usedBytes"`
+	// QuotaBytes es la Cuota de almacenamiento; 0 = sin cuota.
+	QuotaBytes int64 `json:"quotaBytes"`
+	// FileCount son los archivos vivos (fuera de la papelera).
+	FileCount int `json:"fileCount"`
+	// MaxFileSize es el tamaño máximo por archivo, en bytes.
+	MaxFileSize int64 `json:"maxFileSize"`
+	// AllowedMimeTypes son los tipos admitidos (admite "image/*"). Vacío = cualquiera; nunca es nil.
+	AllowedMimeTypes []string `json:"allowedMimeTypes"`
 }

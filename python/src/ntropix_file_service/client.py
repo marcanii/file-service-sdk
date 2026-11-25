@@ -6,6 +6,7 @@ recibe únicamente instrucciones de subida (URLs firmadas) a través de `handle_
 
 from __future__ import annotations
 
+import email.utils
 import hashlib
 import hmac
 import io
@@ -31,7 +32,8 @@ from typing import (
     Union,
 )
 
-from ._token import create_upload_token, verify_upload_token
+from ._version import __version__
+from ._token import CANONICAL_UNIX, LOWER_HEX_SHA256, create_upload_token, verify_upload_token
 from .errors import FileRejectedError, FileServiceError, WebhookSignatureError
 from .models import (
     CompletedPart,
@@ -41,6 +43,8 @@ from .models import (
     PartUrl,
     UploadInstructions,
     UploadResult,
+    Usage,
+    Visibility,
     WebhookEvent,
 )
 
@@ -53,7 +57,7 @@ UploadData = Union[bytes, bytearray, memoryview, str, "os.PathLike[str]", Binary
 PartsInput = Iterable[Union[CompletedPart, Mapping[str, Any], Tuple[int, str]]]
 
 _MAX_PARTS_PER_REQUEST = 100
-_USER_AGENT = "ntropix-file-service-python/1.1.0"
+_USER_AGENT = f"ntropix-file-service-python/{__version__}"
 
 
 def _strip_quotes(etag: str) -> str:
@@ -97,13 +101,19 @@ class FileService:
         size: int,
         *,
         owner_ref: Optional[str] = None,
-        visibility: Optional[str] = None,
+        visibility: Optional[Visibility] = None,
         metadata: Optional[Mapping[str, Any]] = None,
+        sha256: Optional[str] = None,
         actor: Optional[str] = None,
     ) -> CreatedUpload:
         """Inicia una subida. Devuelve el `id` y las instrucciones para subir los bytes directo
-        al storage. Después hay que llamar a `complete()`. No se reintenta: repetirlo dejaría un
-        archivo huérfano."""
+        al storage. Después hay que llamar a `complete()`. Solo se reintenta ante 429 (el servicio
+        rechazó el request sin procesarlo): repetirlo tras un 5xx o un corte de red podría dejar
+        un archivo huérfano.
+
+        `sha256` es el Checksum declarado (64 hex en minúscula): en subida simple el storage
+        rechaza un contenido distinto; en multipart, el archivo termina `FAILED`."""
+        _check_sha256(sha256)
         body: Dict[str, Any] = {"original_name": name, "mime_type": mime_type, "size_bytes": size}
         if owner_ref is not None:
             body["owner_ref"] = owner_ref
@@ -111,6 +121,8 @@ class FileService:
             body["visibility"] = visibility
         if metadata is not None:
             body["metadata"] = dict(metadata)
+        if sha256 is not None:
+            body["sha256"] = sha256
         raw = self._request("POST", "/files", body=body, actor=actor, idempotent=False)
         return CreatedUpload(id=raw["id"], status=raw["status"], upload=UploadInstructions.from_api(raw["upload"]))
 
@@ -133,13 +145,14 @@ class FileService:
         verificación. Es idempotente.
 
         :param parts: requerido en multipart: las partes con sus ETags.
-        :param wait: `True` espera (hasta 30 s) a que el archivo quede `AVAILABLE`; un número fija
-            el tiempo máximo en segundos. Si termina en FAILED o QUARANTINED lanza `FileRejectedError`.
+        :param wait: sin espera (devuelve el archivo en `READY`) con `False`, `None`, `0` o un
+            número negativo; `True` espera hasta 30 s a que quede `AVAILABLE`; un número positivo
+            fija el tiempo máximo en segundos. Si termina en FAILED o QUARANTINED lanza `FileRejectedError`.
         """
         normalized = self._normalize_parts(parts)
         body = {"parts": [{"part_number": p.part_number, "etag": p.etag} for p in normalized]} if normalized else None
         file = FileInfo.from_api(self._request("POST", f"/files/{self._seg(id)}/complete", body=body, actor=actor))
-        if wait is False or wait is None:
+        if wait is None or wait is False or (wait is not True and float(wait) <= 0):
             return file
         timeout = 30.0 if wait is True else float(wait)
         return self.wait_until_available(id, timeout=timeout, actor=actor)
@@ -206,6 +219,11 @@ class FileService:
             next_cursor=raw.get("next_cursor") or None,
         )
 
+    def usage(self) -> Usage:
+        """Uso del Proyecto contra su Cuota y límites de su Política. Sirve con una key de solo
+        lectura; consultarlo antes de iniciar una subida evita un `quota_exceeded`."""
+        return Usage.from_api(self._request("GET", "/usage"))
+
     def iter_all(
         self,
         *,
@@ -230,7 +248,7 @@ class FileService:
         self,
         id: str,
         *,
-        visibility: Optional[str] = None,
+        visibility: Optional[Visibility] = None,
         name: Optional[str] = None,
         actor: Optional[str] = None,
     ) -> FileInfo:
@@ -243,11 +261,20 @@ class FileService:
         return FileInfo.from_api(self._request("PATCH", f"/files/{self._seg(id)}", body=body, actor=actor))
 
     def delete(self, id: str, *, actor: Optional[str] = None) -> None:
-        """Manda el archivo a la papelera. Se recupera con `restore()` durante la retención."""
+        """Manda el archivo a la papelera. Se recupera con `restore()` durante la retención. Sobre
+        una subida en curso (sin completar), la cancela: ya no se puede restaurar ni completar."""
         self._request("DELETE", f"/files/{self._seg(id)}", actor=actor)
 
+    def purge(self, id: str, *, actor: Optional[str] = None) -> None:
+        """Purga anticipada: borra el archivo en el acto y sin vuelta atrás, esté o no en la
+        papelera (p. ej. un pedido de borrado de datos personales). No se lista, no se restaura, no
+        se descarga y su URL pública deja de responder. Si otro archivo del Proyecto comparte el
+        contenido, ese contenido sigue; si no, el servicio lo borra en su ciclo de limpieza. Una
+        subida en curso → `invalid_state` (usá `delete()`); inexistente o ya purgado → `not_found`."""
+        self._request("POST", f"/files/{self._seg(id)}/purge", actor=actor)
+
     def restore(self, id: str, *, actor: Optional[str] = None) -> FileInfo:
-        """Recupera un archivo de la papelera."""
+        """Recupera un archivo de la papelera. Una subida cancelada no se restaura: `invalid_state`."""
         return FileInfo.from_api(self._request("POST", f"/files/{self._seg(id)}/restore", actor=actor))
 
     def upload(
@@ -257,27 +284,50 @@ class FileService:
         data: UploadData,
         *,
         owner_ref: Optional[str] = None,
-        visibility: Optional[str] = None,
+        visibility: Optional[Visibility] = None,
         metadata: Optional[Mapping[str, Any]] = None,
         actor: Optional[str] = None,
         wait: Union[bool, float] = True,
+        sha256: Optional[str] = None,
     ) -> FileInfo:
         """Sube un archivo desde el servidor (por ejemplo uno generado por el backend) y, por
-        defecto, espera a que quede disponible.
+        defecto, espera a que quede disponible (`wait` con la misma semántica que en `complete()`:
+        `False`/`0` no espera, `True` hasta 30 s, un número positivo fija los segundos).
 
         `data` puede ser `bytes`, una ruta (`str` / `PathLike`) o un archivo binario abierto. Con
         una ruta o un archivo, en multipart se lee una parte por vez: el archivo nunca se carga
         entero en memoria. Para archivos del usuario preferí `handle_upload()`: así los bytes no
         pasan por tu backend.
+
+        Checksum declarado: con bytes, una ruta o un archivo con seek, el SDK calcula el SHA-256
+        leyendo el contenido por bloques (sin cargarlo entero) y lo declara. Para un stream sin seek
+        no calcula nada: pasá `sha256` (64 hex en minúscula) si lo conocés. En subida simple el
+        storage rechaza un contenido distinto (`checksum_mismatch`); en multipart el archivo
+        termina `FAILED`.
         """
-        if isinstance(data, (bytes, bytearray, memoryview)):
+        _check_sha256(sha256)
+
+        def send(stream: BinaryIO, size: int, declared: Optional[str]) -> FileInfo:
             return self._upload_stream(
-                name, mime_type, io.BytesIO(bytes(data)), len(data), owner_ref, visibility, metadata, actor, wait
+                name,
+                mime_type,
+                stream,
+                size,
+                owner_ref=owner_ref,
+                visibility=visibility,
+                metadata=metadata,
+                actor=actor,
+                wait=wait,
+                sha256=declared,
             )
+
+        if isinstance(data, (bytes, bytearray, memoryview)):
+            buf = io.BytesIO(bytes(data))
+            return send(buf, len(data), sha256 or _sha256_of(buf))
         if isinstance(data, (str, os.PathLike)):
             size = os.path.getsize(data)
             with open(data, "rb") as fh:
-                return self._upload_stream(name, mime_type, fh, size, owner_ref, visibility, metadata, actor, wait)
+                return send(fh, size, sha256 or _sha256_of(fh))
         if hasattr(data, "read"):
             stream = data
             if stream.seekable():
@@ -285,12 +335,11 @@ class FileService:
                 size = stream.seek(0, io.SEEK_END) - start
                 stream.seek(start)
                 stream = _OffsetReader(stream, start)  # type: ignore[assignment]
-            else:
-                # Sin seek no se puede saber el tamaño ni releer: se materializa en memoria.
-                buf = stream.read()
-                size = len(buf)
-                stream = io.BytesIO(buf)
-            return self._upload_stream(name, mime_type, stream, size, owner_ref, visibility, metadata, actor, wait)
+                return send(stream, size, sha256 or _sha256_of(stream))
+            # Sin seek no se puede saber el tamaño ni releer: se materializa en memoria. No se hashea:
+            # el Checksum declarado de un stream de una sola pasada lo aporta quien llama.
+            buf = io.BytesIO(stream.read())
+            return send(buf, len(buf.getvalue()), sha256)
         raise TypeError("upload: data debe ser bytes, una ruta o un archivo binario abierto")
 
     # ─── Webhooks ────────────────────────────────────────────────────────────
@@ -307,23 +356,26 @@ class FileService:
         """
         if not signature:
             raise WebhookSignatureError("falta el header FS-Signature")
-        fields: Dict[str, str] = {}
+        t_raw: Optional[str] = None
+        candidates: List[str] = []
         for kv in signature.split(","):
             k, sep, v = kv.strip().partition("=")
-            if sep:
-                fields[k.strip()] = v.strip()
-        t_raw, v1 = fields.get("t", ""), fields.get("v1", "")
-        try:
-            t = int(t_raw)
-        except ValueError:
-            raise WebhookSignatureError("FS-Signature con formato inválido") from None
-        if not v1:
+            if not sep:
+                continue
+            if k == "t":
+                if t_raw is not None:
+                    raise WebhookSignatureError("FS-Signature con formato inválido")
+                t_raw = v
+            elif k == "v1" and LOWER_HEX_SHA256.fullmatch(v):
+                candidates.append(v)
+        if t_raw is None or not CANONICAL_UNIX.fullmatch(t_raw) or not candidates:
             raise WebhookSignatureError("FS-Signature con formato inválido")
 
         body = payload.encode("utf-8") if isinstance(payload, str) else bytes(payload)
-        expected = hmac.new(secret.encode("utf-8"), f"{t}.".encode("ascii") + body, hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(expected.encode("ascii"), v1.lower().encode("ascii", "replace")):
+        expected = hmac.new(secret.encode("utf-8"), f"{t_raw}.".encode("ascii") + body, hashlib.sha256).hexdigest()
+        if not any(hmac.compare_digest(expected.encode("ascii"), v1.encode("ascii")) for v1 in candidates):
             raise WebhookSignatureError("la firma del webhook no coincide")
+        t = int(t_raw)
         if abs(time.time() - t) > tolerance:
             raise WebhookSignatureError("el evento es demasiado viejo")
         try:
@@ -339,7 +391,7 @@ class FileService:
         body: Union[Mapping[str, Any], str, bytes],
         owner_ref: str,
         *,
-        visibility: Optional[str] = None,
+        visibility: Optional[Visibility] = None,
         metadata: Optional[Mapping[str, Any]] = None,
         wait_timeout: float = 30,
         actor: Optional[str] = None,
@@ -391,6 +443,9 @@ class FileService:
             size = req.get("size")
             if not isinstance(size, int) or isinstance(size, bool) or size < 0:
                 raise _BadRequest(400, "validation", "size debe ser un entero ≥ 0")
+            sha256 = req.get("sha256")
+            if sha256 is not None and not (isinstance(sha256, str) and LOWER_HEX_SHA256.fullmatch(sha256)):
+                raise _BadRequest(400, "validation", "sha256 debe ser 64 hex en minúscula")
             client_meta = req.get("metadata")
             if client_meta is not None and not isinstance(client_meta, dict):
                 raise _BadRequest(400, "validation", "metadata debe ser un objeto")
@@ -398,7 +453,14 @@ class FileService:
             if client_meta is not None or metadata is not None:
                 merged = {**(client_meta or {}), **(dict(metadata) if metadata else {})}
             created = self.create_upload(
-                name, mime_type, size, owner_ref=owner_ref, visibility=visibility, metadata=merged, actor=actor
+                name,
+                mime_type,
+                size,
+                owner_ref=owner_ref,
+                visibility=visibility,
+                metadata=merged,
+                sha256=sha256,
+                actor=actor,
             )
             token = create_upload_token(self._api_key, created.id, owner_ref, now=time.time())
             return UploadResult(200, {"id": created.id, "token": token, "upload": created.upload.to_dict()})
@@ -501,14 +563,23 @@ class FileService:
         mime_type: str,
         stream: BinaryIO,
         size: int,
+        *,
         owner_ref: Optional[str],
         visibility: Optional[str],
         metadata: Optional[Mapping[str, Any]],
         actor: Optional[str],
         wait: Union[bool, float],
+        sha256: Optional[str],
     ) -> FileInfo:
         created = self.create_upload(
-            name, mime_type, size, owner_ref=owner_ref, visibility=visibility, metadata=metadata, actor=actor
+            name,
+            mime_type,
+            size,
+            owner_ref=owner_ref,
+            visibility=visibility,
+            metadata=metadata,
+            sha256=sha256,
+            actor=actor,
         )
         up = created.upload
         parts: Optional[List[CompletedPart]] = None
@@ -553,10 +624,19 @@ class FileService:
                 with urllib.request.urlopen(req, timeout=max(self._timeout, 120)) as res:
                     return _strip_quotes(res.headers.get("ETag") or "")
             except urllib.error.HTTPError as exc:
+                exc.close()
+                if exc.code == 412 and attempt > 1:
+                    # Subida simple de escritura única (If-None-Match: *): el intento anterior escribió
+                    # y se perdió su respuesta. El objeto ya es el nuestro.
+                    return ""
+                if exc.code == 400 and _has_checksum_header(headers):
+                    # Con el Checksum declarado firmado en el PUT, un 400 es contenido distinto del declarado.
+                    raise FileServiceError(
+                        400, "checksum_mismatch", "el contenido no coincide con su SHA-256 declarado"
+                    ) from None
                 err = FileServiceError(
                     exc.code, "storage_rejected", f"el storage rechazó la subida (HTTP {exc.code})"
                 )
-                exc.close()
                 if exc.code < 500 or attempt == attempts:
                     raise err from None
             except (urllib.error.URLError, OSError) as exc:
@@ -586,8 +666,8 @@ class FileService:
             data = json.dumps(body).encode("utf-8")
             headers["Content-Type"] = "application/json"
 
-        # Solo se reintenta lo que es seguro repetir: crear un archivo dos veces dejaría uno huérfano.
-        attempts = self._retries + 1 if idempotent else 1
+        # Lo no idempotente (crear) solo se reintenta ante 429: el servicio ni lo procesó.
+        attempts = self._retries + 1
         last: Optional[FileServiceError] = None
         for attempt in range(1, attempts + 1):
             req = urllib.request.Request(self._base_url + path, data=data, headers=headers, method=method)
@@ -614,21 +694,50 @@ class FileService:
                     str(err_obj.get("message") or f"respuesta inesperada del File Service (HTTP {status})"),
                     (exc.headers.get("X-Request-ID") if exc.headers else None) or None,
                 )
-                if not (status == 429 or status >= 500):
+                if not (status == 429 or (idempotent and status >= 500)):
                     raise last from None
             except (socket.timeout, TimeoutError):
                 last = FileServiceError(0, "timeout", f"el File Service no respondió en {self._timeout} s")
+                if not idempotent:
+                    raise last from None
             except urllib.error.URLError as exc:
                 if isinstance(exc.reason, (socket.timeout, TimeoutError)):
                     last = FileServiceError(0, "timeout", f"el File Service no respondió en {self._timeout} s")
                 else:
                     last = FileServiceError(0, "network", f"no se pudo conectar con el File Service: {_reason(exc)}")
+                if not idempotent:
+                    raise last from None
             except (OSError, ValueError) as exc:  # conexión cortada, JSON inválido…
                 last = FileServiceError(0, "network", f"no se pudo conectar con el File Service: {_reason(exc)}")
+                if not idempotent:
+                    raise last from None
             if attempt < attempts:
                 self._sleep(retry_after if retry_after is not None else 0.25 * 2 ** (attempt - 1))
         assert last is not None
         raise last
+
+
+_HASH_CHUNK = 1 << 20
+
+
+def _sha256_of(stream: BinaryIO) -> str:
+    """SHA-256 de `stream` desde su posición 0, leyendo por bloques; deja el stream en 0."""
+    stream.seek(0)
+    h = hashlib.sha256()
+    for block in iter(lambda: stream.read(_HASH_CHUNK), b""):
+        h.update(block)
+    stream.seek(0)
+    return h.hexdigest()
+
+
+def _check_sha256(sha256: Optional[str]) -> None:
+    """Checksum declarado: 64 hex en minúscula, el mismo formato que `content_hash`."""
+    if sha256 is not None and not (isinstance(sha256, str) and LOWER_HEX_SHA256.fullmatch(sha256)):
+        raise FileServiceError(0, "validation", "sha256 debe ser 64 hex en minúscula")
+
+
+def _has_checksum_header(headers: Optional[Mapping[str, str]]) -> bool:
+    return any(k.lower() == "x-amz-checksum-sha256" for k in (headers or {}))
 
 
 class _OffsetReader(io.RawIOBase):
@@ -696,14 +805,22 @@ def _req_str(req: Mapping[str, Any], key: str) -> str:
     return v
 
 
+_MAX_RETRY_AFTER = 60.0
+
+
 def _parse_retry_after(value: Optional[str]) -> Optional[float]:
+    """Segundos a esperar según `Retry-After` (segundos o fecha HTTP), con tope de 60 s."""
     if not value:
         return None
     try:
         secs = float(value)
     except ValueError:
-        return None
-    return min(secs, 60.0) if secs > 0 else None
+        try:
+            when = email.utils.parsedate_to_datetime(value)
+        except (TypeError, ValueError):
+            return None
+        secs = when.timestamp() - time.time()
+    return min(secs, _MAX_RETRY_AFTER) if secs > 0 else None
 
 
 def _reason(exc: BaseException) -> str:

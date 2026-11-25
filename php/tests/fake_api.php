@@ -17,10 +17,12 @@ file_put_contents("{$state}/log.jsonl", json_encode([
     'path' => $path,
     'query' => $_SERVER['QUERY_STRING'] ?? '',
     'auth' => $_SERVER['HTTP_AUTHORIZATION'] ?? null,
+    'userAgent' => $_SERVER['HTTP_USER_AGENT'] ?? null,
     'actor' => $_SERVER['HTTP_FS_ACTOR'] ?? null,
     'contentType' => $_SERVER['CONTENT_TYPE'] ?? null,
     'length' => strlen($raw),
     'body' => $body,
+    'rawBody' => $raw,
 ]) . "\n", FILE_APPEND | LOCK_EX);
 
 /** Cuenta cuántas veces se pidió algo (para simular fallas transitorias). */
@@ -55,7 +57,7 @@ function file_json(string $id, string $status, bool $download = false): array
     $f = [
         'id' => $id, 'project' => 'demo', 'status' => $status, 'original_name' => 'foto.jpg',
         'mime_type' => 'image/jpeg', 'size_bytes' => 10, 'owner_ref' => 'user_1', 'visibility' => 'private',
-        'metadata' => (object) [], 'created_at' => '2026-11-10T12:00:00Z',
+        'metadata' => $id === 'meta' ? json_decode('{"tags":{},"n":1}') : (object) [], 'created_at' => '2026-11-10T12:00:00Z',
     ];
     if ($download && $status === 'AVAILABLE') {
         $f['download'] = ['url' => 'http://storage/x', 'expires_at' => '2026-11-10T12:05:00Z'];
@@ -65,7 +67,17 @@ function file_json(string $id, string $status, bool $download = false): array
 }
 
 if (str_starts_with($path, '/storage/')) {
-    if ($method === 'PUT') {
+    // Escritura única (If-None-Match: *): "lost" escribe pero la 1.ª respuesta se pierde (503) y el
+    // reintento ve 412; "used" es una URL ya usada (412 de entrada).
+    if ($method === 'PUT' && $path === '/storage/lost') {
+        hit($state, $path) === 1 ? reply(503) : reply(412);
+    } elseif ($method === 'PUT' && $path === '/storage/used') {
+        reply(412);
+    } elseif ($method === 'PUT' && isset($_SERVER['HTTP_X_AMZ_CHECKSUM_SHA256'])
+        && $_SERVER['HTTP_X_AMZ_CHECKSUM_SHA256'] !== base64_encode(hash('sha256', $raw, true))) {
+        // Como el storage: un contenido distinto del checksum firmado se rechaza sin escribir.
+        reply(400);
+    } elseif ($method === 'PUT') {
         reply(200, null, ['ETag: "etag-' . strlen($raw) . '"']);
     } else {
         reply(405);
@@ -85,6 +97,8 @@ if (($_SERVER['HTTP_AUTHORIZATION'] ?? '') === 'Bearer fsk_test_desactivada') {
 if ($method === 'POST' && $path === '/files') {
     if (($body['original_name'] ?? '') === 'caido.txt') {
         fail(503, 'internal');
+    } elseif (($body['original_name'] ?? '') === 'limitado.txt' && hit($state, 'create-limitado') === 1) {
+        fail(429, 'rate_limited', ['Retry-After: 1']);
     } elseif (($body['size_bytes'] ?? 0) > 1_000_000) {
         fail(413, 'too_large');
     } elseif (($body['size_bytes'] ?? 0) > 100) {
@@ -94,10 +108,20 @@ if ($method === 'POST' && $path === '/files') {
         ]]);
     } else {
         reply(201, ['id' => 'f-simple', 'status' => 'PENDING', 'upload' => [
-            'mode' => 'simple', 'url' => "{$self}/storage/f-simple",
-            'headers' => ['Content-Type' => $body['mime_type'] ?? ''], 'expires_at' => '2026-11-11T12:00:00Z',
+            'mode' => 'simple',
+            'url' => "{$self}/storage/" . match ($body['original_name'] ?? '') {
+                'perdida.txt' => 'lost', 'usada.txt' => 'used', default => 'f-simple',
+            },
+            'headers' => ['Content-Type' => $body['mime_type'] ?? ''] + (isset($body['sha256'])
+                ? ['x-amz-checksum-sha256' => base64_encode((string) hex2bin($body['sha256']))] : []),
+            'expires_at' => '2026-11-11T12:00:00Z',
         ]]);
     }
+    return true;
+}
+
+if ($method === 'GET' && $path === '/usage') {
+    reply(200, ['used_bytes' => 400, 'quota_bytes' => 1000, 'file_count' => 3, 'max_file_size' => 2048, 'allowed_mime_types' => ['image/*']]);
     return true;
 }
 
@@ -130,6 +154,8 @@ if (preg_match('#^/files/([^/]+)(/[a-z]+)?$#', $path, $m) === 1) {
             fail(404, 'not_found', ['X-Request-ID: req-123']);
         } elseif ($id === 'quar') {
             reply(200, file_json($id, 'QUARANTINED'));
+        } elseif ($id === 'nuevo') {
+            reply(200, array_merge(file_json($id, 'ARCHIVED'), ['visibility' => 'internal']));
         } elseif ($id === 'slow') {
             reply(200, file_json($id, 'READY'));
         } else {
@@ -138,6 +164,10 @@ if (preg_match('#^/files/([^/]+)(/[a-z]+)?$#', $path, $m) === 1) {
     } elseif ($method === 'PATCH' && $sub === '') {
         reply(200, array_merge(file_json($id, 'AVAILABLE'), ['visibility' => $body['visibility'] ?? 'private']));
     } elseif ($method === 'DELETE' && $sub === '') {
+        reply(204);
+    } elseif ($method === 'POST' && $sub === '/purge' && $id === 'en-curso') {
+        fail(409, 'invalid_state');
+    } elseif ($method === 'POST' && $sub === '/purge') {
         reply(204);
     } elseif ($method === 'POST' && $sub === '/restore') {
         reply(200, file_json($id, 'AVAILABLE'));

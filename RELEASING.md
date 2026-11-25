@@ -23,7 +23,8 @@ publica sin ningún token guardado en el repo (npm revocó los tokens clásicos 
 
 Los cambios llegan por PR a `develop` (desde la fuente de verdad) y se publican desde `main`:
 
-1. Subir la versión en el archivo del paquete (salvo Go y PHP, que se versionan solo por tag).
+1. Subir la versión en el archivo del paquete (salvo Go y PHP, que se versionan solo por tag) y
+   en los User-Agent, y agregar la entrada en [`CHANGELOG.md`](./CHANGELOG.md).
 2. PR `develop → main` y merge.
 3. Sobre `main`, crear los tags. `publish.yml` verifica que la versión del tag coincida con la del
    paquete, corre los tests y publica npm y PyPI; Packagist y Go toman el tag solos.
@@ -37,11 +38,26 @@ Los cambios llegan por PR a `develop` (desde la fuente de verdad) y se publican 
 
 ```bash
 git checkout main && git pull
-git tag js/v1.1.0 && git tag go/v1.1.0 && git tag v1.1.0
-git push origin js/v1.1.0 go/v1.1.0 v1.1.0
+git tag js/v1.2.0 && git tag go/v1.2.0 && git tag v1.2.0
+git push origin js/v1.2.0 go/v1.2.0 v1.2.0
 
 # opcional: que pkg.go.dev lo indexe enseguida
-GOPROXY=https://proxy.golang.org go list -m github.com/ntropix/file-service-sdk/go@v1.1.0
+GOPROXY=https://proxy.golang.org go list -m github.com/ntropix/file-service-sdk/go@v1.2.0
+```
+
+### Versión de Python
+
+La versión vive en `python/pyproject.toml` y en `python/src/ntropix_file_service/_version.py` (de ahí
+salen `__version__` y el User-Agent). Subir las dos a la vez: `python/tests/test_version.py` falla
+en cada CI si difieren.
+
+### Deprecar `0.0.0-stage` en npm (paso manual, una vez)
+
+Quedó publicada una versión de prueba. Con la sesión de npm de un owner de `@ntropix` (2FA):
+
+```bash
+npm deprecate "@ntropix/file-service@0.0.0-stage" "Versión de prueba; usar >=1.0.0"
+npm view "@ntropix/file-service" versions deprecated   # verificar
 ```
 
 Versionado semántico: un cambio incompatible del protocolo o de la API sube el major de todos los SDKs.

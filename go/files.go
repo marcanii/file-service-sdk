@@ -2,6 +2,7 @@ package fileservice
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -23,6 +24,10 @@ type CreateUploadInput struct {
 	Visibility Visibility
 	// Metadata son datos propios del Proyecto (JSON, hasta 16 KB).
 	Metadata map[string]any
+	// SHA256 es el Checksum declarado: SHA-256 del contenido, 64 hex en minúscula. Opcional. En
+	// subida simple el storage rechaza un contenido distinto (CodeChecksumMismatch); en multipart,
+	// el file termina FAILED. Otro formato → CodeValidation, sin llamar a la API.
+	SHA256 string
 }
 
 // CompleteOptions configura [Client.Complete].
@@ -74,6 +79,9 @@ type UpdateInput struct {
 //
 // No se reintenta: repetirla crearía un archivo huérfano.
 func (c *Client) CreateUpload(ctx context.Context, in CreateUploadInput) (*CreatedUpload, error) {
+	if in.SHA256 != "" && !isLowerHex(in.SHA256, sha256.Size*2) {
+		return nil, &Error{Code: CodeValidation, Message: "SHA256 debe ser 64 hex en minúscula"}
+	}
 	body := struct {
 		Name       string         `json:"original_name"`
 		MimeType   string         `json:"mime_type"`
@@ -81,7 +89,8 @@ func (c *Client) CreateUpload(ctx context.Context, in CreateUploadInput) (*Creat
 		OwnerRef   string         `json:"owner_ref,omitempty"`
 		Visibility Visibility     `json:"visibility,omitempty"`
 		Metadata   map[string]any `json:"metadata,omitempty"`
-	}{in.Name, in.MimeType, in.Size, in.OwnerRef, in.Visibility, in.Metadata}
+		SHA256     string         `json:"sha256,omitempty"`
+	}{in.Name, in.MimeType, in.Size, in.OwnerRef, in.Visibility, in.Metadata, in.SHA256}
 	var raw struct {
 		ID     string     `json:"id"`
 		Status FileStatus `json:"status"`
@@ -284,12 +293,22 @@ func (c *Client) Update(ctx context.Context, id string, in UpdateInput) (*File, 
 }
 
 // Delete manda el archivo a la papelera. Se puede recuperar con [Client.Restore] durante el
-// período de retención del Proyecto.
+// período de retención del Proyecto. Sobre una subida en curso (sin completar), la cancela: ya no
+// se puede restaurar ni completar.
 func (c *Client) Delete(ctx context.Context, id string) error {
 	return c.do(ctx, "DELETE", filePath(id, ""), nil, true, nil)
 }
 
-// Restore recupera un archivo de la papelera.
+// Purge es la Purga anticipada: borra el archivo en el acto y sin vuelta atrás, esté o no en la
+// papelera (p. ej. un pedido de borrado de datos personales). No se lista, no se restaura, no se
+// descarga y su URL pública deja de responder. Si otro archivo del Proyecto comparte el contenido,
+// ese contenido sigue; si no, el servicio lo borra en su ciclo de limpieza. Una subida en curso →
+// CodeInvalidState (usá [Client.Delete]); inexistente o ya purgado → CodeNotFound.
+func (c *Client) Purge(ctx context.Context, id string) error {
+	return c.do(ctx, "POST", filePath(id, "/purge"), nil, true, nil)
+}
+
+// Restore recupera un archivo de la papelera. Una subida cancelada no se restaura: CodeInvalidState.
 func (c *Client) Restore(ctx context.Context, id string) (*File, error) {
 	var raw wireFile
 	if err := c.do(ctx, "POST", filePath(id, "/restore"), nil, true, &raw); err != nil {
@@ -300,4 +319,23 @@ func (c *Client) Restore(ctx context.Context, id string) (*File, error) {
 
 func filePath(id, suffix string) string {
 	return "/files/" + url.PathEscape(id) + suffix
+}
+
+// Usage devuelve el uso del Proyecto contra su Cuota y los límites de su Política. Sirve con una
+// key de solo lectura; consultarlo antes de iniciar una subida evita un quota_exceeded.
+func (c *Client) Usage(ctx context.Context) (*Usage, error) {
+	var raw struct {
+		UsedBytes        int64    `json:"used_bytes"`
+		QuotaBytes       int64    `json:"quota_bytes"`
+		FileCount        int      `json:"file_count"`
+		MaxFileSize      int64    `json:"max_file_size"`
+		AllowedMimeTypes []string `json:"allowed_mime_types"`
+	}
+	if err := c.do(ctx, "GET", "/usage", nil, true, &raw); err != nil {
+		return nil, err
+	}
+	if raw.AllowedMimeTypes == nil {
+		raw.AllowedMimeTypes = []string{}
+	}
+	return &Usage{raw.UsedBytes, raw.QuotaBytes, raw.FileCount, raw.MaxFileSize, raw.AllowedMimeTypes}, nil
 }
