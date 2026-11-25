@@ -17,7 +17,7 @@ final class FileService
 {
     private const MAX_PARTS_PER_BATCH = 100;
     private const MAX_RETRY_AFTER = 60.0;
-    private const USER_AGENT = 'ntropix-file-service-php/1.1.0';
+    private const USER_AGENT = 'ntropix-file-service-php/1.2.0';
 
     private readonly string $baseUrl;
 

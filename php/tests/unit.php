@@ -340,7 +340,7 @@ T::test('429 con Retry-After se reintenta', function () use ($fs, $state): void 
 T::test('User-Agent identifica al SDK en cada request', function () use ($fs, $state): void {
     apiLog($state);
     $fs->get('f1');
-    T::eq('ntropix-file-service-php/1.1.0', apiLog($state)[0]['userAgent']);
+    T::eq('ntropix-file-service-php/1.2.0', apiLog($state)[0]['userAgent']);
 });
 
 T::test('createUpload reintenta ante 429 respetando Retry-After', function () use ($fs, $state): void {

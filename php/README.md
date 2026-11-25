@@ -9,7 +9,7 @@ backend que resuelve `handleUpload()` (protocolo en [`PROTOCOL.md`](../PROTOCOL.
 ## Instalación
 
 Por ahora no está en Packagist: se instala desde GitHub declarando el repo en tu `composer.json`.
-Composer toma la versión de los tags (`v1.1.0`).
+Composer toma la versión de los tags (`v1.2.0`).
 
 ```json
 {

@@ -27,7 +27,7 @@ const (
 	// maxRetryAfter acota cuánto se obedece un Retry-After (igual en los 4 SDKs).
 	maxRetryAfter = 60 * time.Second
 	// Version es la versión del SDK.
-	Version = "1.1.0"
+	Version = "1.2.0"
 	// UserAgent es el User-Agent que el SDK manda a la API (mismo formato en los 4 SDKs).
 	UserAgent = "ntropix-file-service-go/" + Version
 )

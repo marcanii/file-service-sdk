@@ -8,13 +8,13 @@ de tu proyecto. Python ≥ 3.9, sin dependencias (solo la biblioteca estándar).
 Por ahora no está en PyPI: se instala desde GitHub, fijando la versión con su tag.
 
 ```bash
-pip install "ntropix-file-service @ git+https://github.com/ntropix/file-service-sdk@v1.1.0#subdirectory=python"
+pip install "ntropix-file-service @ git+https://github.com/ntropix/file-service-sdk@v1.2.0#subdirectory=python"
 ```
 
 En `requirements.txt` va la misma línea; en `pyproject.toml`:
 
 ```toml
-dependencies = ["ntropix-file-service @ git+https://github.com/ntropix/file-service-sdk@v1.1.0#subdirectory=python"]
+dependencies = ["ntropix-file-service @ git+https://github.com/ntropix/file-service-sdk@v1.2.0#subdirectory=python"]
 ```
 
 > Es un SDK **de servidor**: la API key vive solo en tu backend. El navegador sube los bytes

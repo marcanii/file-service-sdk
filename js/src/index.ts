@@ -273,7 +273,7 @@ export function makeUploadToken(apiKey: string, id: string, ownerRef: string, ex
 }
 
 /** User-Agent de todos los requests a la API (misma forma en los 4 SDKs). Mantener = package.json. */
-const USER_AGENT = "ntropix-file-service-js/1.1.0";
+const USER_AGENT = "ntropix-file-service-js/1.2.0";
 
 /** Tope de espera por `Retry-After`, igual en los 4 SDKs. */
 const MAX_RETRY_AFTER_MS = 60_000;
